@@ -29,13 +29,15 @@ def start_test_job(name, md, task, url, model, headers, user, skills_manager,
             )
         except Exception:
             logger.debug("Could not retire replaced skill approval", exc_info=True)
+    if previous_job.get("_workspace_handle"):
+        previous_job["_workspace_handle"].cleanup()
     deps.test_jobs[key] = {
         "status": "running",
         "task": task,
         "model": model,
         "skill": name,
         "started": _time.time(),
-        "log": [{"type": "skill_test_start", "task": task, "skill": name, "model": model}],
+        "log": [{"type": "skill_test_start", "task": task, "skill": name, "model": model, "workspace": request_authority.workspace if request_authority else None}],
         "verdict": None,
         "_run": {
             "md": md,
@@ -117,6 +119,7 @@ def continue_test_job(job, key, name, decision, expected, exact_approval,
         run.get("headers"),
         run.get("owner"),
         skills_manager,
+        request_authority=run.get("request_authority"),
         messages=messages,
         transcript=transcript,
         exact_approval=exact_approval,

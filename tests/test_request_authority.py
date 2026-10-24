@@ -521,6 +521,14 @@ async def test_skill_test_ingress_distinguishes_user_task_from_tool_payload(monk
         headers={INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN} if internal else {},
         state=SimpleNamespace(current_user="alice"),
         json=AsyncMock(return_value={"task": "Run bash in the workspace"}))
+    if internal:
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as failure:
+            await endpoint(request, "skill")
+        assert failure.value.status_code == 403
+        assert not seen
+        assert not skills._skill_test_jobs
+        return
     result = await endpoint(request, "skill")
     await asyncio.sleep(0)
     assert result["status"] == "running"

@@ -241,7 +241,9 @@ async def test_manual_exception_closes_stream_and_finishes_without_publishing(mo
     assert closed == [asyncio.current_task()]
     assert job['status'] == 'done' and '_run' not in job and '_transcript' not in job
     assert {'type': 'error', 'error': 'stream failed'} in job['log']
-    assert manager.updates == [({'confidence': .4}, 'alice')]
+    # A broken stream is evidence about test infrastructure, not the skill.
+    assert manager.updates == []
+    assert job['verdict']['verdict'] == 'inconclusive'
 
 
 async def test_batch_exception_records_progress_and_finalizes_once():

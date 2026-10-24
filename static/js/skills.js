@@ -243,8 +243,8 @@ function _renderSkillsSummary() {
   const chips = [
     _summaryChip('all', 'All', skills.length, 'Show all skills'),
     _summaryChip('builtin', 'Built-in', skills.length - userSkills.length, 'Shipped procedures'),
-    _summaryChip('approved', 'Approved', m.approved, 'Skills approved for use'),
-    _summaryChip('draft', 'Draft', userSkills.length - m.approved, 'Unapproved and archived skills; automatic review handles eligible drafts'),
+    _summaryChip('approved', 'Audit approved', m.approved, 'Published skills that meet the audit approval rules'),
+    _summaryChip('draft', 'Needs review', userSkills.length - m.approved, 'Skills without audit approval, including drafts and archived skills'),
   ];
   el.innerHTML = chips.join('');
 }
@@ -431,11 +431,11 @@ function _auditModelPills(sk) {
   const worker = sk.audit_worker_model || '';
   const teacher = sk.audit_teacher_model || '';
   const verdict = String(sk.audit_verdict || '').toLowerCase();
-  if (!verdict) return '<span class="memory-cat-badge skill-model-pill skill-model-student skill-audit-pending" title="Queued for automatic skill check">queued</span>';
+  if (!verdict) return '<span class="memory-cat-badge skill-model-pill skill-model-student skill-audit-pending" title="No audit result yet; automatic review runs when eligible">Not audited</span>';
   if (skillNeedsReview(sk, _skillApprovalThreshold)) {
     const model = worker ? ` Last check: ${worker}.` : '';
     const reason = sk.audit_summary ? ` ${sk.audit_summary}` : '';
-    return `<span class="memory-cat-badge skill-model-pill skill-model-student skill-audit-${esc(verdict)}" title="Draft: the previous check did not approve it. Eligible drafts are reviewed automatically.${esc(model + reason)}">draft</span>`;
+    return `<span class="memory-cat-badge skill-model-pill skill-model-student skill-audit-${esc(verdict)}" title="Audit needs review. Publication status is shown separately.${esc(model + reason)}">Audit: ${esc(verdict.replace(/_/g, ' '))}</span>`;
   }
   return teacher
     ? `<span class="memory-cat-badge skill-model-pill skill-model-teacher" title="Improved automatically by ${esc(teacher)}">improved</span>`
@@ -507,7 +507,7 @@ function _turnSavingsHtml(sk) {
 }
 
 function _skillStatsHtml(sk) {
-  const approved = skillIsApproved(sk, _skillApprovalThreshold) ? _statusPill(sk) : '';
+  const approved = _statusPill(sk);
   return `${_auditMarks(sk)}${approved}`;
 }
 
@@ -1349,7 +1349,7 @@ async function _setSkillStatus(name, status) {
       body: JSON.stringify({ status }),
     });
     await loadSkills();
-    uiModule.showToast(status === 'published' ? 'Skill approved' : 'Skill moved to draft');
+    uiModule.showToast(status === 'published' ? 'Skill published; audit status is unchanged' : 'Skill moved to draft');
   } catch (e) { uiModule.showError('Update failed: ' + e.message); }
 }
 
@@ -1358,16 +1358,37 @@ async function _setSkillStatus(name, status) {
 async function _fetchTestStatus(name) {
   try {
     const r = await fetch(`${API}/api/skills/${encodeURIComponent(name)}/test-status`);
-    return r.ok ? await r.json() : { status: 'none' };
-  } catch { return { status: 'none' }; }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } catch (error) { return { status: 'unavailable', error: String(error.message || error) }; }
 }
 
 function _renderTestLog(logEl, verdictEl, job, card, name) {
   if (!logEl) return;
+  if (job.status === 'none' || job.status === 'unavailable') {
+    // Keep the last visible evidence when a restart or transport error loses
+    // the transient server job. Never turn a failed poll into an empty panel.
+    logEl.querySelector('.skill-test-status-error')?.remove();
+    const notice = document.createElement('div');
+    notice.className = 'skill-test-err skill-test-status-error';
+    notice.textContent = job.status === 'none'
+      ? 'Test tracking was lost, possibly after a server restart. Saved skill results are unchanged. Use Retry to start a new test.'
+      : `Unable to read test status: ${job.error || 'connection failed'}. Checking again…`;
+    logEl.appendChild(notice);
+    if (job.status === 'none' && verdictEl && !verdictEl.querySelector('[data-act="retry"]')) {
+      const retry = document.createElement('button');
+      retry.className = 'doclib-card-text-btn doclib-card-action-btn';
+      retry.dataset.act = 'retry';
+      retry.textContent = 'Retry';
+      retry.addEventListener('click', () => _testSkill(card, name, true));
+      verdictEl.appendChild(retry);
+    }
+    return;
+  }
   logEl.innerHTML = '';
   const add = (txt, cls) => { const d = document.createElement('div'); if (cls) d.className = cls; d.textContent = txt; logEl.appendChild(d); };
   for (const ev of (job.log || [])) {
-    if (ev.type === 'skill_test_start') { add('Task: ' + ev.task, 'skill-test-task'); add('Model: ' + ev.model, 'skill-test-meta'); }
+    if (ev.type === 'skill_test_start') { add('Task: ' + ev.task, 'skill-test-task'); add('Model: ' + ev.model, 'skill-test-meta'); if (ev.workspace) add('Temporary workspace: ' + ev.workspace, 'skill-test-meta'); }
     else if (ev.type === 'agent_step') add('— round ' + ev.round + ' —', 'skill-test-round');
     else if (ev.type === 'tool_start') add('▸ ' + ev.tool + '  ' + String(ev.command || '').slice(0, 200), 'skill-test-tool');
     else if (ev.type === 'tool_output') add(String(ev.output || '').slice(0, 500), 'skill-test-out');
@@ -1454,6 +1475,17 @@ async function _testSkill(card, name, force = false) {
   let job = force ? { status: 'none' } : await _fetchTestStatus(name);
 
   if (job.status === 'none') {
+    const task = await uiModule.styledPrompt(
+      'Describe one concrete task to test. A temporary workspace will be used. Commands outside the request still require exact approval.',
+      { title: 'Test skill', confirmText: 'Start test', defaultValue: card._testTask || '', placeholder: 'For example: create a tiny local fixture and verify its result.' },
+    );
+    if (!task) {
+      logEl.textContent = 'Test not started. Enter a concrete task to run a test.';
+      verdictEl.innerHTML = '<button class="doclib-card-text-btn doclib-card-action-btn" data-act="retry">Start test</button>';
+      verdictEl.querySelector('[data-act="retry"]')?.addEventListener('click', () => _testSkill(card, name, true));
+      return;
+    }
+    card._testTask = task;
     logEl.innerHTML = '<div class="skill-test-meta">Starting test…</div>';
     let model = '', endpoint_url = '';
     try {
@@ -1464,7 +1496,7 @@ async function _testSkill(card, name, force = false) {
     try {
       const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}/test`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, endpoint_url }),
+        body: JSON.stringify({ model, endpoint_url, task }),
       });
       if (!res.ok) { logEl.innerHTML = '<div class="skill-test-err">Test failed: HTTP ' + res.status + '</div>'; return; }
     } catch (e) { logEl.innerHTML = '<div class="skill-test-err">Test failed: ' + (e.message || e) + '</div>'; return; }
@@ -1474,7 +1506,7 @@ async function _testSkill(card, name, force = false) {
   _renderTestLog(logEl, verdictEl, job, card, name);
   _setCardRunning(card, job.status === 'running');
 
-  if (job.status === 'running') {
+  if (job.status === 'running' || job.status === 'unavailable') {
     card._testPoll = setInterval(async () => {
       // Keep polling even if the card is collapsed (the test runs server-side);
       // only stop once the card itself is gone from the DOM.
@@ -1482,7 +1514,7 @@ async function _testSkill(card, name, force = false) {
       const s = await _fetchTestStatus(name);
       // Update the expanded log only while it's still on screen.
       if (document.body.contains(logEl)) _renderTestLog(logEl, verdictEl, s, card, name);
-      if (s.status !== 'running') {
+      if (s.status !== 'running' && s.status !== 'unavailable') {
         clearInterval(card._testPoll); card._testPoll = null;
         _setCardRunning(card, false);
         // If the log isn't visible (card was collapsed), still update the
@@ -1608,9 +1640,9 @@ function _renderTestVerdict(el, v, card, name) {
   // Reflect the skill's current state: if it's already published, the button
   // confirms "Approved" (click to unpublish) rather than offering to approve.
   const isPub = card && card.dataset && card.dataset.skillStatus === 'published';
-  const approveLabel = isPub ? 'Approved' : 'Approve';
+  const approveLabel = isPub ? 'Published' : 'Publish';
   const approveCls = 'skill-eval-approve' + (isPub ? ' is-approved' : (verdict === 'pass' ? ' suggested' : ''));
-  const approveTitle = isPub ? 'Already approved — click to unpublish' : 'Publish — appears in the skills index';
+  const approveTitle = isPub ? 'Published — click to unpublish; audit status is separate' : 'Publish — automatic approval rules still apply';
   el.innerHTML =
     '<div class="skill-eval-head"><span class="skill-eval-badge skill-eval-' + cls + '">' + label + (conf ? ' · ' + conf : '') + '</span>' +
     '<span class="skill-eval-summary">' + esc((v && v.summary) || '') + '</span></div>' +
@@ -1634,8 +1666,8 @@ function _renderTestVerdict(el, v, card, name) {
     const btn = el.querySelector('[data-act="approve"]');
     if (btn) {
       const pub = card.dataset.skillStatus === 'published';
-      btn.textContent = pub ? 'Approved' : 'Approve';
-      btn.title = pub ? 'Already approved — click to unpublish' : 'Publish — appears in the skills index';
+      btn.textContent = pub ? 'Published' : 'Publish';
+      btn.title = pub ? 'Published — click to unpublish; audit status is separate' : 'Publish — automatic approval rules still apply';
       btn.classList.toggle('is-approved', pub);
       btn.classList.toggle('suggested', !pub && verdict === 'pass');
     }
@@ -1754,6 +1786,11 @@ async function _auditAllSkills(opts = {}) {
   if (!panel) return;
   // If a run is already going, just (re)attach to it.
   let st = await _fetchAuditStatus();
+  if (st.status === 'unavailable') {
+    panel.classList.remove('hidden');
+    _renderAuditPanel(panel, st);
+    return;
+  }
   if (st.status !== 'running') {
     const explicitNames = Array.isArray(opts.names) ? opts.names.filter(Boolean) : null;
     const allNames = skills
@@ -1792,7 +1829,7 @@ async function _auditAllSkills(opts = {}) {
       _renderAuditPanel(panel, s);
       _applyAuditResults(s);
       _highlightAuditCard(s.status === 'running' ? s.current : null);
-      if (s.status !== 'running') {
+      if (s.status !== 'running' && s.status !== 'unavailable') {
         clearInterval(_auditPoll); _auditPoll = null;
         _highlightAuditCard(null);
         loadSkills();  // refresh statuses (some may have been demoted/edited)
@@ -1879,12 +1916,22 @@ function _highlightAuditCard(name) {
 async function _fetchAuditStatus() {
   try {
     const r = await fetch(`${API}/api/skills/audit-all/status`);
-    return r.ok ? await r.json() : { status: 'none' };
-  } catch { return { status: 'none' }; }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } catch (error) { return { status: 'unavailable', error: String(error.message || error) }; }
 }
 
 function _renderAuditPanel(panel, st) {
-  if (st.status === 'none') { panel.classList.add('hidden'); panel.innerHTML = ''; return; }
+  if (st.status === 'none' || st.status === 'unavailable') {
+    panel.querySelector('.skill-test-status-error')?.remove();
+    const notice = document.createElement('div');
+    notice.className = 'skill-test-err skill-test-status-error';
+    notice.textContent = st.status === 'none'
+      ? 'Audit tracking was lost, possibly after a server restart. Saved skill results are still available.'
+      : `Unable to read audit status: ${st.error || 'connection failed'}. Try again shortly.`;
+    panel.appendChild(notice);
+    return;
+  }
   const done = st.done || 0, total = st.total || 0;
   const pct = total ? Math.round((done / total) * 100) : 0;
   const counts = {};

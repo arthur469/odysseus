@@ -603,10 +603,16 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
 
         user = _owner(request)
         body = await request.json()
-        task = (body.get("task") or "").strip()
-        from src.agent_runtime.authority import RequestAuthority, request_authority_for_http
-        request_authority = (request_authority_for_http(request, task, owner=user)
-                             if task else RequestAuthority.empty(owner=user))
+        if not isinstance(body, dict) or not isinstance(body.get("task", ""), str):
+            raise HTTPException(400, "Test body must contain a text task.")
+        task = body.get("task", "").strip()
+        if len(task) > 8000:
+            raise HTTPException(400, "Test task is too long.")
+        from src.agent_runtime.authority import request_authority_for_http, require_user_approval_request
+        require_user_approval_request(request)
+        existing = _skill_test_jobs.get((user or "", skill_id)) or {}
+        if existing.get("status") == "running":
+            raise HTTPException(409, "This skill test is already running.")
 
         skills = skills_manager.load(owner=user)
         match = next((s for s in skills if s.get("name") == skill_id or s.get("id") == skill_id), None)
@@ -650,10 +656,21 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         except Exception as _e:
             logger.warning(f"Skill-test model resolve failed: {_e}")
 
-        return _job_coordinator.start_test_job(
-            name, md, task, url, model, headers, user, skills_manager,
-            request_authority, deps=_audit_dependencies(),
-        )
+        from services.skills.workspaces import create_test_workspace
+        workspace = create_test_workspace(match.get("path"))
+        try:
+            request_authority = request_authority_for_http(
+                request, body.get("task", "").strip(), owner=user, workspace=workspace.name,
+            )
+            result = _job_coordinator.start_test_job(
+                name, md, task, url, model, headers, user, skills_manager,
+                request_authority, deps=_audit_dependencies(),
+            )
+            _skill_test_jobs[(user or "", name)]["_workspace_handle"] = workspace
+            return result
+        except BaseException:
+            workspace.cleanup()
+            raise
 
     @router.post("/{skill_id}/test-approval")
     async def approve_skill_test_action(request: Request, skill_id: str):

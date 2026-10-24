@@ -33,9 +33,9 @@ def test_skills_summary_surfaces_audit_health_and_quick_filters():
     assert "await _loadSkillApprovalThreshold();" in SKILLS_JS
     assert "skillsSummaryMetrics(userSkills, _skillApprovalThreshold)" in SKILLS_JS
     assert "_summaryChip('all', 'All'" in SKILLS_JS
-    assert "_summaryChip('approved', 'Approved'" in SKILLS_JS
+    assert "_summaryChip('approved', 'Audit approved'" in SKILLS_JS
     assert "_summaryChip('builtin', 'Built-in'" in SKILLS_JS
-    assert "_summaryChip('draft', 'Draft'" in SKILLS_JS
+    assert "_summaryChip('draft', 'Needs review'" in SKILLS_JS
     summary = SKILLS_JS.split('function _renderSkillsSummary()', 1)[1].split('function _sortSkills', 1)[0]
     assert summary.count('_summaryChip(') == 4
     assert ".skills-summary-chip.active" in STYLE
@@ -112,9 +112,9 @@ def test_skill_card_statuses_are_compact_and_unambiguous():
     assert 'class="skill-card-title-row"' in SKILLS_JS
     assert "sk.source === 'builtin' ? _sourcePill(sk) : ''" in SKILLS_JS
     assert 'class="memory-cat-badge skill-status-pill skill-status-published"' in SKILLS_JS
-    assert "skillIsApproved(sk, _skillApprovalThreshold) ? _statusPill(sk) : ''" in SKILLS_JS
-    assert 'Queued for automatic skill check' in SKILLS_JS
-    assert 'Eligible drafts are reviewed automatically.' in SKILLS_JS
+    assert "const approved = _statusPill(sk);" in SKILLS_JS
+    assert 'No audit result yet' in SKILLS_JS
+    assert 'Publication status is shown separately.' in SKILLS_JS
     assert 'esc(model + reason)' in SKILLS_JS
     assert ".skill-status-published" in STYLE
     assert ".skill-card:not(.doclib-card-expanded) .skill-card-tags { display: none; }" in STYLE

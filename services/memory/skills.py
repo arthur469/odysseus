@@ -209,6 +209,10 @@ class SkillsManager:
             return
         for root, _dirs, files in os.walk(self.skills_root, followlinks=False):
             if "SKILL.md" in files:
+                # Nested SKILL.md files are bundle resources, not independent
+                # skills. In particular, owner backfill must not materialize
+                # imported resource copies into skills/general (#5200).
+                _dirs[:] = []
                 yield os.path.join(root, "SKILL.md")
 
     def _read_skill(self, path: str) -> Optional[Skill]:

@@ -52,25 +52,31 @@ async def run_test_job(
             say_buf.clear()
 
     messages = list(messages) if isinstance(messages, list) else deps.test_messages(md, task)
+    authority = request_authority or (
+        exact_approval.pending.request_authority if exact_approval is not None else None
+    ) or RequestAuthority.empty(owner=owner)
     try:
         # aclosing: pausing for an approval leaves this loop early, and the
         # stream's ContextVar cleanup must run in this task, not in asyncio's
         # finalizer (#6635).
         async with aclosing(stream_agent_loop(
             url, model, messages, headers=headers,
-            temperature=0.3, max_tokens=0, max_rounds=8, owner=owner,
-            exact_approval=exact_approval,
-            request_authority=(request_authority or (
-                exact_approval.pending.request_authority if exact_approval is not None else None
-            ) or RequestAuthority.empty(owner=owner)),
+            temperature=0.3, max_tokens=4096, max_rounds=8, owner=owner,
+            exact_approval=exact_approval, request_authority=authority,
+            workspace=authority.workspace or None, suppress_skills=True,
         )) as stream:
             async for chunk in stream:
-                if not chunk.startswith("data: ") or chunk.strip() == "data: [DONE]":
+                payload = next((line[6:] for line in chunk.splitlines() if line.startswith("data: ")), None)
+                if payload is None or payload == "[DONE]":
                     continue
                 try:
-                    d = _json.loads(chunk[6:])
+                    d = _json.loads(payload)
                 except Exception:
                     continue
+                if not isinstance(d, dict):
+                    continue
+                if d.get("error") or d.get("type") == "error":
+                    raise SkillAuditUnavailable(str(d.get("error") or d.get("message") or "Test stream failed"))
                 if d.get("delta"):
                     say_buf.append(d["delta"]); transcript.append(d["delta"])
                 elif d.get("type") == "tool_start":
@@ -88,6 +94,11 @@ async def run_test_job(
                         tool_log["ask_user"] = approval
                     log.append(tool_log)
                     transcript.append(f"[output] {out}\n")
+                    if any(reason in out.lower() for reason in (
+                        "containment unavailable", "process creation requires a sealed workspace",
+                        "approved action has no sealed process/job identity",
+                    )):
+                        raise SkillAuditUnavailable(out)
                     if (
                         isinstance(approval, dict)
                         and approval.get("kind") == "tool_approval"
@@ -125,6 +136,13 @@ async def run_test_job(
     except Exception as e:
         _flush_say()
         log.append({"type": "error", "error": str(e)})
+        job.pop("approval", None)
+        job.pop("_run", None)
+        job.pop("_transcript", None)
+        job["verdict"] = {"verdict": "inconclusive", "confidence": 0,
+                          "summary": f"Test infrastructure failed: {e}", "issues": []}
+        job["status"] = "done"
+        return
 
     job.pop("approval", None)
     job.pop("_transcript", None)

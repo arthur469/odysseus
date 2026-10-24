@@ -431,6 +431,21 @@ def _list_github_dir(src: ResolvedSource, rel_dir: str, out: Dict[str, str], *, 
         out[rel] = text
 
 
+def _strip_bundle_prefix(files: Dict[str, str], prefix: str) -> Dict[str, str]:
+    """Root a bundle at the selected skill directory, never at the repository."""
+    prefix = _safe_relpath(prefix).rstrip('/') + '/' if prefix else ''
+    out = {}
+    for path, content in files.items():
+        path = _safe_relpath(path)
+        if prefix and not path.startswith(prefix):
+            raise SkillImportError("Bundle file is outside the selected skill directory")
+        rel = path[len(prefix):] if prefix else path
+        if not rel:
+            raise SkillImportError("Empty bundle file path")
+        out[rel] = content
+    return out
+
+
 def fetch_skill_bundle(url: str) -> Tuple[Dict[str, str], ResolvedSource]:
     """Download SKILL.md and sibling text assets. Returns relative_path → content."""
     src = parse_skill_source(url)
@@ -445,15 +460,18 @@ def fetch_skill_bundle(url: str) -> Tuple[Dict[str, str], ResolvedSource]:
                 _list_github_dir(src, parent, files)
             except SkillImportError:
                 pass
-        return files, src
+        return _strip_bundle_prefix(files, parent), src
 
     if path:
         try:
             _fetch_text(_raw_url(src, f"{path}/SKILL.md"))
-            _list_github_dir(src, path, files)
-            return files, src
         except Exception:
             pass
+        else:
+            # Only the presence probe may fall back. Never swallow a failed
+            # download or prefix validation and return an unrooted bundle.
+            _list_github_dir(src, path, files)
+            return _strip_bundle_prefix(files, path), src
         try:
             text = _fetch_text(_raw_url(src, path))
             if path.lower().endswith(".md"):
