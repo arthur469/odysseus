@@ -4,10 +4,12 @@
 `personal` contains recovered, reviewed local changes. Keep runtime data,
 credentials, configuration and backups outside this repository's history.
 
-The initial `origin` is a local bare repository because this session could not
-create a GitHub fork. It is a recovery destination, not a GitHub fork.
-`upstream` fetches the official repository and has an intentionally disabled
-push URL. Do not replace the active installation with this checkout.
+`origin` is the public GitHub fork at https://github.com/arthur469/odysseus.
+`local-backup` preserves the local bare recovery repository created before
+GitHub authentication was available. `upstream` fetches the official repository
+and has an intentionally disabled push URL. Do not replace the active
+installation with this checkout. GitHub Actions is disabled on the fork;
+GitHub Pages is not configured.
 
 ## Review an upstream update
 
@@ -36,23 +38,21 @@ When the integration is validated, fast-forward `personal` to it and push only
 to the personal origin. A Git update is not a deployment. Deployment requires
 a fresh data backup and a separate decision about the active installation.
 
-## Completing the GitHub fork later
+## GitHub and the local recovery copy
 
-Create a fork of `odysseus-dev/odysseus` in the authenticated account, retaining
-the `dev` branch. Verify GitHub reports `fork: true` and the expected parent.
-Keep the local bare origin as an additional recovery destination before
-changing remotes:
+The fork was created on 2026-10-24 after browser authentication through Git
+Credential Manager. GitHub confirmed `fork: true`, parent
+`odysseus-dev/odysseus`, and the expected `dev` revision. No credentials or
+runtime data were added to the repository. Scan outgoing commits for secrets
+before later publications. Review workflows and publishing credentials before
+enabling Actions or Pages.
+
+Push validated branches to `origin`. Also refresh the independent local copy
+when appropriate:
 
 ```powershell
-git remote rename origin local-backup
-git remote add origin https://github.com/YOUR_LOGIN/odysseus.git
-git fetch origin
-git push --set-upstream origin dev personal
+git push local-backup dev personal
 ```
-
-Replace `YOUR_LOGIN` only after confirming the account and fork. Scan the
-outgoing commits for secrets again before publishing. Disable Actions and
-Pages until their workflows and publishing credentials have been reviewed.
 
 ## Development and validation
 
