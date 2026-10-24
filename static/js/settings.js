@@ -9,6 +9,7 @@ import { initTtsSettings, initSttSettings } from './settings/speech.js';
 import { initDocumentWritingStyle } from './settings/writingStyle.js';
 import { initImageSettings } from './settings/imageModels.js';
 import { initAgentSettings } from './settings/agent.js';
+import { initApplicationControls } from './settings/application.js';
 import { getSettingsRegistryIssues } from './settings/registry.js';
 import { bindSettingsSearch } from './settings/search.js';
 import { bindSettingsSidebar } from './settings/sidebar.js';
@@ -1696,6 +1697,7 @@ async function initShortcuts() {
    INIT & REFRESH
    ═══════════════════════════════════════════ */
 function initAccount() {
+  initApplicationControls({ confirm: (...args) => uiModule.styledConfirm(...args) });
   // Populate user info
   fetch('/api/auth/status', { credentials: 'same-origin' })
     .then(r => r.json())
