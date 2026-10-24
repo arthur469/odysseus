@@ -7999,6 +7999,12 @@ Maintain a structured task list for multi-step coding work. Use it when the task
 ```
 Return the absolute path of the active workspace folder. File tools are CONFINED to it (paths can be RELATIVE to it); the shell starts there (cwd) but is NOT sandboxed. Call this first when the user says "the project"/"the code"/"this folder" without a path, instead of asking them. No arguments.""",
 
+    "ls": """\
+```ls
+{"path": "."}
+```
+List directory entries using the existing workspace-confined file reader. The optional path defaults to the active workspace; /workspace refers to its root. For a file/folder inventory, call get_workspace and then ls instead of running shell commands. This tool does not execute code or change files. Use it to inspect the selected Desktop workspace before proposing how to organize icons and shortcuts. A directory entry alone does not prove that directory is empty.""",
+
     "create_document": """\
 ```create_document
 <title>
@@ -25503,6 +25509,9 @@ async def stream_agent_loop(
             "output": _truncate(approved_output),
             "exit_code": approved_result.get("exit_code"),
             "approved": True,
+            "execution_profile": approved.execution_profile,
+            **{key: approved_result[key] for key in ("containment", "teardown", "failure_kind", "blocked")
+               if key in approved_result},
         }
         for key in (
             "image_url",
@@ -25626,7 +25635,11 @@ async def stream_agent_loop(
             "exit_code": approved_result.get("exit_code"),
             "approved": True,
             "approval_digest": approved.digest[:16],
+            "execution_profile": approved.execution_profile,
         }
+        for key in ("containment", "teardown", "failure_kind", "blocked"):
+            if key in approved_result:
+                approved_tool_event[key] = approved_result[key]
         for key in (
             "image_url",
             "image_prompt",
@@ -33183,6 +33196,15 @@ async def stream_agent_loop(
                     full_command,
                 )
             )
+            from src.host_execution_approval import host_execution_reason, host_chat_authorized
+            host_chat_grant = host_chat_authorized(block.tool_type, block.content,
+                workspace=workspace, owner=owner, session_id=session_id,
+                delegated=run_security.delegated_credential, client_runtime_context=client_runtime_context)
+            host_approval_reason = (
+                host_execution_reason(block.tool_type, block.content, workspace=workspace,
+                                      owner=owner, client_runtime_context=client_runtime_context)
+                if not run_security.delegated_credential and not host_chat_grant else None
+            )
             # A parsed model action can be rejected by a schema, policy, or
             # recovery guard before dispatch.  Keep that distinct from an
             # executed tool call in the streamed trace so canonical decoding
@@ -33353,7 +33375,7 @@ async def stream_agent_loop(
                     "Tool blocked before approval by current policy: %s",
                     block.tool_type,
                 )
-            elif not security_decision.allowed:
+            elif (not security_decision.allowed and not host_chat_grant) or host_approval_reason:
                 approval_document = (
                     active_document
                     if block.tool_type
@@ -33417,6 +33439,7 @@ async def stream_agent_loop(
                         request_text=_last_user,
                         request_authority=active_request_authority(),
                         client_runtime_context=client_runtime_context,
+                        execution_profile="host_once" if host_approval_reason else "workspace_sandbox",
                     )
                     desc = f"{block.tool_type}: APPROVAL REQUIRED"
                     result = {
@@ -33424,7 +33447,7 @@ async def stream_agent_loop(
                         "exit_code": None,
                         "approval_required": True,
                         "ask_user": pending_approval.public_payload(
-                            reason=security_decision.reason,
+                            reason=host_approval_reason or security_decision.reason,
                         ),
                     }
                     logger.info(
@@ -34048,6 +34071,9 @@ async def stream_agent_loop(
 
             # Emit tool_output (include ui_event data if present)
             tool_output_data = {"type": "tool_output", "tool": block.tool_type, "command": cmd_display, "output": output_text, "exit_code": result.get("exit_code"), "execution_attempted": _execution_attempted, "blocked": bool(result.get("blocked", False))}
+            for boundary_key in ("containment", "teardown"):
+                if boundary_key in result:
+                    tool_output_data[boundary_key] = result[boundary_key]
             if _runtime_action is not None:
                 _runtime_action.normalize(block, 'agent_loop compatibility adapters')
                 _runtime_action.finish(result)
@@ -34994,6 +35020,9 @@ async def stream_agent_loop(
                 "output": output_text,
                 "exit_code": result.get("exit_code"),
             }
+            for boundary_key in ("containment", "teardown"):
+                if boundary_key in result:
+                    tool_event[boundary_key] = result[boundary_key]
             if _requested_host_command_text:
                 tool_event["requested_command"] = _requested_host_command_text
             if result.get("image_url"):

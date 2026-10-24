@@ -38,6 +38,7 @@ import {
 import { createTerminalStreamError, isRecoverableStreamError } from './chatStreamErrors.js';
 import { loadPanel } from './panels.js?v=20260909movepicklayer1';
 import { invalidateSettings } from './appConfig.js';
+import { createHostExecutionIndicator } from './hostExecution.js';
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
@@ -45,6 +46,9 @@ import { invalidateSettings } from './appConfig.js';
   const RESEARCH_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 
   let API_BASE = '';
+  const hostExecutionIndicator = createHostExecutionIndicator({
+    getSessionId: () => sessionModule.getCurrentSessionId?.(), apiBase: () => API_BASE,
+  });
   let currentAbort = null;
   let isStreaming = false;
   // Continuous stall watchdog: while streaming, if the SSE stream produces
@@ -233,7 +237,7 @@ import { invalidateSettings } from './appConfig.js';
   document.addEventListener('odysseus:tool-approval', (event) => {
     const detail = event && event.detail ? event.detail : {};
     const decision = String(detail.decision || '').toLowerCase();
-    if (!detail.approval_id || !['approve', 'approve_task', 'deny'].includes(decision)) return;
+    if (!detail.approval_id || !['approve', 'approve_task', 'approve_host_chat', 'deny'].includes(decision)) return;
     _pendingToolApproval = {
       approval_id: String(detail.approval_id),
       decision,
@@ -4041,6 +4045,9 @@ import { invalidateSettings } from './appConfig.js';
                   if (!spinner?.element) _replaceThinkingSpinner('Preparing agent');
                 }
                 continue;
+              }
+              if (json.type === 'tool_output' && ['bash', 'python'].includes(json.tool)) {
+                hostExecutionIndicator.refresh();
               }
               if (json.type === 'tool_approval_resolved') {
                 _cancelThinkingTimer();

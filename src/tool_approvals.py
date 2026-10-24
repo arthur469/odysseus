@@ -131,6 +131,7 @@ def _binding_payload(
     owned_operation=None,
     process_operation=None,
     browser_operation=None,
+    execution_profile: str = "workspace_sandbox",
 ) -> dict[str, Any]:
     return {
         "owner": _normalized_owner(owner),
@@ -157,6 +158,7 @@ def _binding_payload(
         "owned_operation": owned_operation.to_dict() if owned_operation is not None else None,
         "process_operation": process_operation.to_dict() if process_operation is not None else None,
         "browser_operation": browser_operation.to_dict() if browser_operation is not None else None,
+        "execution_profile": execution_profile,
     }
 
 
@@ -192,9 +194,10 @@ class PendingToolApproval:
     owned_operation: BoundOwnedOperation | None = None
     process_operation: BoundProcessOperation | None = None
     browser_operation: BoundBrowserOperation | None = None
+    execution_profile: str = "workspace_sandbox"
 
     def public_payload(self, *, reason: str | None = None) -> dict[str, Any]:
-        return {
+        payload = {
             "kind": "tool_approval",
             "approval_id": self.approval_id,
             # The browser already owns this chat id. Persisting it with the
@@ -241,8 +244,27 @@ class PendingToolApproval:
                 "workspace": self.workspace or None,
                 "document_id": self.document_id or None,
                 "document_version": self.document_version,
+                "execution_profile": self.execution_profile,
             },
         }
+        if self.execution_profile == "host_once":
+            payload.update(
+                question="Allow execution without isolation?",
+                description=reason or (
+                    "This command runs with the Odysseus OS account's permissions. "
+                    "It can access files outside the workspace, use the host network, "
+                    "and start child processes that may survive cancellation."
+                ),
+                options=[
+                    {"label": "Allow this command once without isolation", "value": TASK_APPROVAL_DECISION,
+                     "description": "Run only the displayed command with the OS account's permissions. Future commands need a new approval."},
+                    {"label": "Allow commands in this chat without isolation", "value": "approve_host_chat",
+                     "description": "Allow native Bash and Python commands in this chat until revoked. They can access files outside the workspace with the OS account's permissions. Changing workspace requires a new approval."},
+                    {"label": "Deny", "value": DENY_APPROVAL_DECISION,
+                     "description": "Do not execute this command."},
+                ],
+            )
+        return payload
 
 
 @dataclass
@@ -257,6 +279,7 @@ class ExactToolApproval:
     # chat still get SINGLE_ACTION, which leaves the gate armed behind the
     # sealed action.
     allow_remaining_actions: bool = True
+    grants_host_chat: bool = False
     _claimed: bool = field(default=False, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
@@ -306,6 +329,7 @@ class ExactToolApproval:
             owned_operation=self.pending.owned_operation,
             process_operation=self.pending.process_operation,
             browser_operation=self.pending.browser_operation,
+            execution_profile=self.pending.execution_profile,
         )
         return _canonical_digest(expected) == self.pending.digest
 
@@ -391,9 +415,18 @@ class ToolApprovalStore:
         request_text: Any = "",
         request_authority: RequestAuthority | None = None,
         client_runtime_context: dict | None = None,
+        execution_profile: str = "workspace_sandbox",
     ) -> PendingToolApproval:
         if request_authority is not None and not isinstance(request_authority, RequestAuthority):
             raise TypeError("Approval authority must be server-owned RequestAuthority")
+        if execution_profile not in {"workspace_sandbox", "host_once"}:
+            raise ValueError("Unsupported approval execution profile")
+        if execution_profile == "host_once":
+            from src.host_execution_approval import host_execution_reason
+            if (request_authority is None or request_authority.inherited
+                    or not host_execution_reason(tool_name, content, workspace=workspace, owner=owner,
+                                                 client_runtime_context=client_runtime_context)):
+                raise ValueError("Host approval requires an eligible native action and a selected workspace")
         now = time.time()
         from src.agent_runtime.authority import ExactOperation
         from src.agent_runtime.resource_binding import NATIVE_FILESYSTEM_TOOLS, resolve_filesystem_operation
@@ -472,6 +505,8 @@ class ToolApprovalStore:
                 pass
         effects = tuple(sorted(effect.value for effect in capabilities.effects))
         result_integrity = capabilities.result_integrity.value
+        if execution_profile == "host_once" and process_operation is None:
+            raise ValueError("Host approval requires a sealed process identity")
         payload = _binding_payload(
             owner=owner,
             session_id=session_id,
@@ -493,6 +528,7 @@ class ToolApprovalStore:
             owned_operation=owned_operation,
             process_operation=process_operation,
             browser_operation=browser_operation,
+            execution_profile=execution_profile,
         )
         pending = PendingToolApproval(
             approval_id=secrets.token_urlsafe(32),
@@ -522,6 +558,7 @@ class ToolApprovalStore:
             owned_operation=owned_operation,
             process_operation=process_operation,
             browser_operation=browser_operation,
+            execution_profile=execution_profile,
         )
         with self._lock:
             self._purge_expired_locked(now)
@@ -587,6 +624,16 @@ class ToolApprovalStore:
                 return None
             self._pending.pop(approval_key, None)
         normalized_decision = str(decision or "").strip().lower()
+        if pending.execution_profile == "host_once":
+            if normalized_decision not in {TASK_APPROVAL_DECISION, "approve_host_chat"}:
+                return None
+            if normalized_decision == "approve_host_chat" and (not allow_continuation or not pending.session_id):
+                return None
+            return ExactToolApproval(pending, scope=ToolApprovalScope.SINGLE_ACTION,
+                                     allow_remaining_actions=False,
+                                     grants_host_chat=normalized_decision == "approve_host_chat")
+        if normalized_decision == "approve_host_chat":
+            return None
         scope = scope_for_decision(normalized_decision)
         if scope is None:
             return None

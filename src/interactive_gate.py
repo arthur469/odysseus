@@ -95,6 +95,10 @@ def should_track_interactive_request(path: str, method: str = "GET") -> bool:
         return False
     if (method or "").upper() == "OPTIONS":
         return False
+    # Redirects and automated reachability probes are not browser interaction.
+    # Real interaction on the login page is covered by its POST request.
+    if path == "/login" and (method or "").upper() in {"GET", "HEAD"}:
+        return False
     if path in _PASSIVE_EXACT_PATHS:
         return False
     if any(path.startswith(prefix) for prefix in _PASSIVE_PREFIXES):

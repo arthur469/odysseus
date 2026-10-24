@@ -1905,9 +1905,11 @@ def parse_tool_blocks(
                 # local models really emit for no-arg tools. Dispatch with
                 # empty args and let the tool's own validation answer;
                 # silently dropping the call left models concluding email was
-                # broken. Other tags (bash, python, ...) keep skipping: empty
+                # broken. Workspace discovery also accepts no arguments:
+                # get_workspace has none, and ls defaults to the selected
+                # root. Other tags (bash, python, ...) keep skipping: empty
                 # content is nothing to run.
-                if tag in BUILTIN_EMAIL_TOOLS or tag in additional_names:
+                if tag in BUILTIN_EMAIL_TOOLS or tag in {"get_workspace", "ls"} or tag in additional_names:
                     declared_tag = additional_names.get(tag, tag)
                     blocks.append(ToolBlock(declared_tag, "{}" if tag in additional_names else ""))
                 continue

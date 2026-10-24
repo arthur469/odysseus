@@ -440,7 +440,17 @@ def bind_request_authority(authority):
     if not isinstance(authority, RequestAuthority):
         raise TypeError("Authority must be server-owned RequestAuthority")
     parent = _ACTIVE.get()
-    authority = parent.intersect(authority) if parent is not None else authority
+    if parent is not None:
+        narrowed = parent.intersect(authority)
+        # A restricted copy of the same top-level request is not a delegation.
+        # The grants, policies and resource scopes are still intersected.
+        # A different request or a child authority stays inherited.
+        if (parent.request_id == authority.request_id
+                and (parent.owner, parent.session_id, parent.workspace)
+                    == (authority.owner, authority.session_id, authority.workspace)
+                and not parent.inherited and not authority.inherited):
+            narrowed = replace(narrowed, inherited=False)
+        authority = narrowed
     token = _ACTIVE.set(authority)
     try:
         yield authority

@@ -383,6 +383,31 @@ def setup_session_routes(
     SESSION_MODEL_VALIDATION_TIMEOUT = min(float(REQUEST_TIMEOUT or 20), 3.0)
     OPENAI_API_KEY = config.get("OPENAI_API_KEY")
     SESSIONS_FILE = config.get("SESSIONS_FILE")
+
+    @router.get('/session/{sid}/host-execution')
+    def host_execution_status(request: Request, sid: str, workspace: str | None = Query(None)):
+        _verify_session_owner(request, sid, session_manager)
+        from src.host_chat_grants import get_grant
+        from src.tool_execution import _owner_is_admin
+        sess = session_manager.get_session(sid)
+        owner = effective_user(request) or getattr(sess, 'owner', '')
+        record = get_grant(owner, sid, workspace)
+        return {'enabled': bool(record) and _owner_is_admin(owner),
+                'workspace': record['root']['path'] if record else None,
+                'scope': 'chat_session'}
+
+    @router.delete('/session/{sid}/host-execution')
+    def revoke_host_execution(request: Request, sid: str):
+        _verify_session_owner(request, sid, session_manager)
+        from routes.chat_routes import _reject_delegated_tool_approval
+        from src.agent_runtime.authority import require_user_approval_request
+        _reject_delegated_tool_approval(request)
+        require_user_approval_request(request)
+        from src.host_chat_grants import revoke
+        sess = session_manager.get_session(sid)
+        revoke(effective_user(request) or getattr(sess, 'owner', ''), sid)
+        return {'enabled': False, 'scope': 'chat_session',
+                'message': 'Future commands require approval. Already running commands are unaffected.'}
     
     @router.get("/sessions")
     def list_sessions(request: Request):
@@ -689,6 +714,9 @@ def setup_session_routes(
                 db.close()
         if cwd is not None:
             clean_cwd = cwd.strip() or None
+            if clean_cwd != session.cwd:
+                from src.host_chat_grants import revoke
+                revoke(effective_user(request) or getattr(session, 'owner', ''), sid)
             db = SessionLocal()
             try:
                 db_session = db.query(DbSession).filter(DbSession.id == sid).first()

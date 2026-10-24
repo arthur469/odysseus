@@ -46,7 +46,7 @@ FAMILY_TOOLS = {
 # this small recovery surface when no family was recognized; explicit family
 # selections and policy denials remain narrower.
 CONTRACT_CORE_TOOLS = frozenset({
-    "bash", "python", "read_file", "web_search", "web_fetch", "ask_user",
+    "bash", "python", "read_file", "get_workspace", "ls", "web_search", "web_fetch", "ask_user",
 })
 
 _WORKSPACE_PREFIX_RE = re.compile(r"/workspace/", re.I)
@@ -1010,6 +1010,32 @@ def _routing_email_scope(message: str) -> str:
     )
 
 
+def _workspace_inventory_requested(message: str) -> bool:
+    """Recognize an explicit local inventory without admitting file changes."""
+    text = str(message or '').strip().casefold()
+    if re.search(r'https?://|\b(?:website|webpage|site\s+web)\b', text):
+        return False
+    if re.search(r'\b(?:get_workspace|ls|read_file|grep|glob)\b', text):
+        return False
+    if re.match(r'^(?:how\b|why\b|comment\b|pourquoi\b|explain\b|explique\b)', text):
+        return False
+    # Do not narrow a compound execution request to a read-only inventory.
+    # Its existing operation classifier remains responsible for that request.
+    if re.search(
+        r'\b(?:move|delete|remove|rename|write|create|edit|fix|build|implement|execute|run|'
+        r'save|persist|export|render|generate|verify|'
+        r'd[eé]placer|supprimer|effacer|renommer|[eé]crire|cr[eé]er|modifier|ex[eé]cuter)\b', text,
+    ):
+        return False
+    return bool(
+        re.search(r'\b(?:desktop|bureau|workspace|r[eé]pertoire|dossiers?|folders?|directory)\b', text)
+        and re.search(
+            r'\b(?:scan(?:ner|nez|ning)?|inspect(?:e[rz]?|ing)?|list(?:e[rz]?|ing)?|'
+            r'inventori(?:er|ez)|analy[sz](?:e|er|ez|ing)|show|affich(?:er|ez)|voir)\b', text,
+        )
+    )
+
+
 def selected_tools_for_request(message: str) -> frozenset[str] | None:
     """Narrow only a complete, explicit operation; None retains family scope.
 
@@ -1057,6 +1083,8 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
         return image_tools
     if standalone_code_request(text):
         return frozenset({'create_document'})
+    if _workspace_inventory_requested(raw_text):
+        return frozenset({'get_workspace', 'ls'})
     explicitly_named_web = {
         name
         for name in ("web_search", "web_fetch")

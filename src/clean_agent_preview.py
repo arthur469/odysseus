@@ -182,7 +182,7 @@ READ_TOOLS = frozenset({
     'search_hf_models', 'pdf_extract', 'private_browser', 'list_cookbook_servers', 'list_models',
     'list_served_models', 'list_cached_models', 'list_serve_presets', 'list_downloads',
     'tail_serve_output',
-    'extract_text',
+    'extract_text', 'get_workspace', 'ls',
     'manage_endpoints', 'manage_mcp', 'manage_tokens', 'manage_webhooks', 'manage_settings',
     'app_api',
 })
@@ -2951,6 +2951,18 @@ def required_read_tool_choice(turn_contract, offered, *, calls=0,
                               attempted_required_tools=frozenset()):
     """Force the first execution owner for a single required operation."""
     required_names = {canonical(tool) for tool in (getattr(turn_contract, 'required', ()) or ())}
+    if {'get_workspace', 'ls'} <= required_names:
+        # Directory inventories have an ordered read dependency. A generic
+        # "required" choice also accepts ask_user and can skip the requested
+        # inspection entirely. Reuse the named-choice protocol for each read.
+        pending = next((name for name in ('get_workspace', 'ls')
+                        if name not in attempted_required_tools), None)
+        if pending:
+            offered_name = next((s['function']['name'] for s in offered
+                                 if canonical(s['function']['name']) == pending), None)
+            if offered_name and turn_contract.permits(offered_name):
+                return {'type': 'function', 'function': {'name': offered_name}}
+            return None
     if {'list_sessions', 'manage_session'} <= required_names:
         # Lookup is mandatory; mutation is not. After seeing candidates the
         # model must be free to ask about ambiguity or report no match.
@@ -5479,6 +5491,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
     )
     security.observe_messages(messages)
     executions, policy_decisions, calls, first_token = [], [], 0, None
+    host_approval_pending = False
     successful_call_signatures = set()
     successful_call_counts = {}
     attempted_required_tools = set()
@@ -5901,6 +5914,31 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                     )
                     if sealed_read_choice is not None:
                         request['tool_choice'] = sealed_read_choice
+                        if (
+                            {'get_workspace', 'ls'} <= set(getattr(turn_contract, 'required', ()))
+                            and isinstance(sealed_read_choice, dict)
+                        ):
+                            # Some local endpoints ignore named choice when
+                            # other schemas remain available. Advertise the
+                            # sole pending read and validate against that wire
+                            # inventory, as the artifact writer path does.
+                            selected_name = sealed_read_choice['function']['name']
+                            request['tools'] = [s for s in request['tools']
+                                                if s['function']['name'] == selected_name]
+                            round_offered = list(request['tools'])
+                            request['messages'] = [*request['messages'], {
+                                'role': 'user', 'content': (
+                                    'The requested directory inventory has not been observed yet. '
+                                    'Call get_workspace now to identify the selected workspace before '
+                                    'giving an organization proposal. This is a read-only operation '
+                                    'already requested by the user.'
+                                    if canonical(selected_name) == 'get_workspace' else
+                                    'The selected workspace has been identified. Call ls now with '
+                                    'path="/workspace" to inspect its directory entries before giving '
+                                    'an organization proposal. This is a read-only operation already '
+                                    'requested by the user. Do not change files.'
+                                ),
+                            }]
                     if artifact_write_phase and not successful_artifact_write:
                         completion_choice = required_artifact_completion_tool_choice(
                             required_artifacts, round_offered,
@@ -6094,6 +6132,11 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                     # established budget/error semantics.
                     round_offered = list(request.get('tools') or [])
                 finish_during_stream = False
+                logging.getLogger(__name__).info(
+                    '[agent-debug] session=%s round=%s model=%s runtime=compact tools_sent=%s tool_names=%s',
+                    session_id, round_number, model, len(request.get('tools') or []),
+                    [schema['function']['name'] for schema in request.get('tools') or []],
+                )
                 async with preview_model_response(client, endpoint_url, headers, request, context_recovery) as response:
                     response.raise_for_status()
                     finish_event = (
@@ -6273,6 +6316,11 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                     })
                 proposed = serialize_required_email_attachment_chain(
                     proposed, contract_required_tools, executions,
+                )
+                logging.getLogger(__name__).info(
+                    '[agent-tool-calls] session=%s round=%s runtime=compact tool_calls=%s tool_names=%s',
+                    session_id, round_number, len(proposed),
+                    [(call.get('function') or {}).get('name') for call in proposed],
                 )
                 if active_editor_target:
                     proposed = drop_redundant_editor_noops(proposed)
@@ -7185,6 +7233,27 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         if block is None:
                             raise ValueError('Tool arguments could not be converted for execution.')
                         calls += 1
+                        from src.host_execution_approval import propose_host_action
+                        host_proposal = propose_host_action(
+                            block, workspace=workspace, owner=owner, session_id=session_id,
+                            security=security, continuation_query=direct_user_text,
+                            selected_tools=[s['function']['name'] for s in offered],
+                            client_runtime_context=client_runtime_context,
+                        )
+                        if host_proposal is not None:
+                            desc, pending_result = host_proposal
+                            pending_event = {
+                                'type': 'tool_output', 'tool': block.tool_type,
+                                'command': arguments, 'desc': desc, 'round': round_number,
+                                **pending_result, 'execution_attempted': False,
+                            }
+                            executions.append(pending_event)
+                            yield event(pending_event)
+                            question = pending_result['ask_user']['question']
+                            history.append({'role': 'assistant', 'content': question})
+                            yield event({'type': 'final_response', 'content': question})
+                            host_approval_pending = True
+                            break
                         yield event({'type': 'tool_start', 'tool': block.tool_type, 'command': arguments,
                                      'full_command': arguments, 'round': round_number})
                         if (
@@ -7729,6 +7798,9 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                                   'execution_attempted': execution_attempted,
                                   'blocked': policy_denied or schema is None,
                                   'desc': desc, 'round': round_number}
+                    for boundary_key in ('containment', 'teardown'):
+                        if boundary_key in result:
+                            tool_event[boundary_key] = result[boundary_key]
                     for error_category in ('tool_execution_error', 'invalid_tool_arguments'):
                         if result.get('error_category') == error_category:
                             tool_event['error_category'] = error_category
@@ -8069,6 +8141,8 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         )
                     if policy_denied:
                         terminal_denial = True
+                if host_approval_pending:
+                    break
                 if round_visual_blocks:
                     visual_message = untrusted_context_message(
                         'tool visual evidence',

@@ -153,6 +153,9 @@ def _pip_dist_name(pkg: dict) -> str:
     derive it from the pip spec (stripping any ``[extras]`` and version markers)
     and fall back to the munged import name only when no pip spec is declared.
     """
+    aliases = {"krea_diffusers": "diffusers", "sam_mask": "torch", "office_docs": "markitdown"}
+    if pkg.get("name") in aliases:
+        return aliases[pkg["name"]]
     pip = (pkg.get("pip") or "").strip()
     if pip:
         base = re.split(r"[\[<>=!~;\s]", pip, maxsplit=1)[0].strip()
@@ -163,6 +166,15 @@ def _pip_dist_name(pkg: dict) -> str:
 
 def _import_optional_dependency_for_status(name: str):
     prepare_optional_dependency_import(name)
+    # These catalog rows describe capabilities, rather than Python module names.
+    requirements = {
+        "krea_diffusers": ("torch", "diffusers", "torchvision", "accelerate"),
+        "sam_mask": ("torch", "torchvision", "transformers", "accelerate", "PIL"),
+        "office_docs": ("markitdown",),
+    }
+    if name in requirements:
+        modules = [importlib.import_module(module) for module in requirements[name]]
+        return modules[-1]
     return importlib.import_module(name)
 
 

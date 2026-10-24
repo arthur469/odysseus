@@ -533,9 +533,15 @@ async def _run_owned_command(command, ctx: dict, *, tool: str, timeout: int, arg
             raise ValueError("Native producer owner or session changed")
         spec = _owned_spec(agent_cwd(), ctx.get("subproc_env"), timeout, readonly_extra)
         validate_launch_spec(launch, spec)
+        from src.host_execution_approval import approved_host_action, activate_chat_approval
+        grant_owner = str(ctx.get("session_id") or ctx.get("owner") or tool)
+        host_approval = approved_host_action(spec, owner=grant_owner)
+        if host_approval is not None:
+            activate_chat_approval(host_approval, spec, owner=grant_owner)
         grant = containment.acquire(
             spec,
-            owner=str(ctx.get("session_id") or ctx.get("owner") or tool),
+            owner=grant_owner,
+            **({"host_approval": host_approval} if host_approval is not None else {}),
         )
         containment._update_record(grant.id, launch_generation=launch.generation)
         publish_launch(launch, authority, grant.id)
@@ -576,7 +582,15 @@ async def _run_owned_command(command, ctx: dict, *, tool: str, timeout: int, arg
 
     boundary = result.grant.to_dict()
     boundary["executed"] = True
+    if host_approval is not None:
+        from src.host_execution_approval import approval_scope
+        boundary['approval_scope'] = approval_scope(host_approval)
     teardown = result.release.to_dict() if result.release else {"dead": False}
+    if result.grant.mode == containment.MODE_HOST_APPROVED:
+        # A returned leader is observable; a Windows process-tree boundary is
+        # not. Do not let a successful command imply that descendants are gone.
+        teardown["process_tree_verified"] = containment.PROCESS_TREE in result.grant.enforced
+        teardown["verification_scope"] = "process_tree" if teardown["process_tree_verified"] else "leader_only"
     output = result.stdout.rstrip()
     if result.stderr.rstrip():
         output = (output + "\nSTDERR: " + result.stderr.rstrip()).strip()
@@ -589,7 +603,9 @@ async def _run_owned_command(command, ctx: dict, *, tool: str, timeout: int, arg
                 "stdout": _truncate(result.stdout, MAX_OUTPUT_CHARS),
                 "stderr": _truncate(result.stderr, MAX_OUTPUT_CHARS)}
     if result.timed_out:
-        return {**common, "error": f"{tool}: timed out after {timeout}s; process tree terminated.{capture_note}",
+        termination_note = ("process tree terminated" if containment.PROCESS_TREE in result.grant.enforced
+                            else "leader stopped; child-process termination is not verified")
+        return {**common, "error": f"{tool}: timed out after {timeout}s; {termination_note}.{capture_note}",
                 "exit_code": 124, "timed_out": True, "stdout": _truncate(result.stdout, MAX_OUTPUT_CHARS),
                 "stderr": _truncate(result.stderr, MAX_OUTPUT_CHARS)}
     if tool == "python":

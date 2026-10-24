@@ -3215,7 +3215,6 @@ def test_native_workspace_tools_require_validated_native_scope():
     samples = {
         'inspect_media': {'path': '/workspace/fixture.webm'},
         'extract_text': {'path': '/workspace/fixture.png'},
-        'ls': {'path': '/workspace'},
         'write_file': {'path': '/workspace/output.html', 'content': '<html></html>'},
     }
     for name, args in samples.items():
@@ -3442,6 +3441,8 @@ def test_saved_tool_trace_retains_only_latest_browser_screenshot():
 
 def test_every_compactly_offered_preview_tool_has_valid_policy_permitted_call():
     samples = {
+        'get_workspace': ({}, 'Show the active workspace'),
+        'ls': ({'path': '/workspace'}, 'List the active workspace entries'),
             'ask_user': ({'question': 'Which one?', 'options': [{'label': 'First'}, {'label': 'Second'}]}, 'ask me which one'),
             'python': ({'code': 'print(2 + 2)'}, 'calculate this'),
             'read_file': ({'path': '/workspace/input.txt'}, 'read this file'),

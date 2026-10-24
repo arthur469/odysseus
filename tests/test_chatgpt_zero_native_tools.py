@@ -30,7 +30,7 @@ _MESSAGES = [
     {"role": "assistant", "content": "<tool>read_file</tool>"},
     {"role": "tool", "content": "README.md"},
 ]
-_ALLOWED_KEYS = {"model", "instructions", "input", "stream", "store", "temperature"}
+_ALLOWED_KEYS = {"model", "instructions", "input", "stream", "store"}
 
 
 def test_responses_payload_has_no_native_tool_surfaces():
@@ -65,7 +65,7 @@ def test_upper_level_tools_argument_is_discarded_by_chatgpt_builder():
 
 
 def test_strip_helper_removes_any_native_tool_key_added_later():
-    payload = {"model": "m", "input": [], "tools": _TOOLS, "tool_choice": "auto", "web_search": {}, "shell": {}, "computer": {}, "future_agent_surface": {}}
+    payload = {"model": "m", "input": [], "temperature": 0.2, "tools": _TOOLS, "tool_choice": "auto", "web_search": {}, "shell": {}, "computer": {}, "future_agent_surface": {}}
     stripped = llm_core._strip_chatgpt_native_tool_surfaces(payload)
     assert set(stripped) == {"model", "input"}
 

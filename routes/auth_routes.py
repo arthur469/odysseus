@@ -752,6 +752,9 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         for keybinds + TTS prefs, so it stays callable without admin."""
         user = _get_current_user(request)
         settings = without_retired_settings(_load_settings())
+        from src.settings import get_user_setting
+        for key in ("utility_endpoint_id", "utility_model", "utility_model_fallbacks", "utility_reasoning_effort"):
+            settings[key] = get_user_setting(key, user or "", settings.get(key))
         if _auth_disabled() or (user and auth_manager.is_admin(user)):
             return settings
         return scrub_settings(settings)
@@ -784,6 +787,15 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 val = max(lo, min(val, hi))
             current[key] = val
         _save_settings(current)
+        user = _get_current_user(request)
+        if user:
+            from routes.prefs_routes import _load_for_user, _save_for_user
+            utility_keys = ("utility_endpoint_id", "utility_model", "utility_model_fallbacks", "utility_reasoning_effort")
+            changed = {key: current[key] for key in utility_keys if key in body}
+            if changed:
+                prefs = _load_for_user(user)
+                prefs.update(changed)
+                _save_for_user(user, prefs)
         return without_retired_settings(current)
 
     @router.post("/settings/document-style/extract")

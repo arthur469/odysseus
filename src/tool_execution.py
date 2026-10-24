@@ -1802,10 +1802,18 @@ async def execute_tool_block(
 
     approval_claimed = False
     if exact_approval is not None:
+        host_once = exact_approval.pending.execution_profile == "host_once"
+        if host_once and (authority.inherited or not _owner_is_admin(owner)):
+            return f"{transport}: BLOCKED", {
+                "error": "Host execution requires an administrator's interactive exact approval.",
+                "exit_code": 1, "blocked": True, "policy": "exact_tool_approval",
+            }
         if (
             not isinstance(security_context, ToolRunSecurityContext)
-            or not security_context.external_untrusted_context_seen
-            or not exact_approval.pending.external_untrusted_context_seen
+            or (not host_once and (
+                not security_context.external_untrusted_context_seen
+                or not exact_approval.pending.external_untrusted_context_seen
+            ))
         ):
             return (
                 f"{getattr(block, 'tool_type', None)}: BLOCKED",
@@ -1870,11 +1878,15 @@ async def execute_tool_block(
             )
 
     if isinstance(security_context, ToolRunSecurityContext) and not approval_claimed:
+        from src.host_execution_approval import host_chat_authorized
+        chat_host_grant = host_chat_authorized(transport, getattr(block, "content", None),
+            workspace=workspace, owner=owner, session_id=session_id, authority=authority,
+            delegated=security_context.delegated_credential, client_runtime_context=client_runtime_context)
         decision = security_context.decision_for(
             getattr(block, "tool_type", None),
             getattr(block, "content", None),
         )
-        if not decision.allowed:
+        if not decision.allowed and not chat_host_grant:
             logger.warning(
                 "External-context policy blocked tool=%r",
                 getattr(block, "tool_type", None),
@@ -1893,9 +1905,13 @@ async def execute_tool_block(
             browser_operation = replace(browser_operation, exact_approval=exact_approval)
         normalized = resource_operation or owned_operation
         sealed_document = owned_operation or (exact_approval.pending if approval_claimed else None)
+        from src.host_execution_approval import bind_host_execution_approval
         with (bind_request_authority(authority), bind_resource_operation(resource_operation),
               bind_backend_operation(backend_operation), bind_owned_operation(owned_operation),
-              bind_process_operation(process_operation), bind_browser_operation(browser_operation)):
+              bind_process_operation(process_operation), bind_browser_operation(browser_operation),
+              bind_host_execution_approval(exact_approval if approval_claimed else None,
+                  delegated=isinstance(security_context, ToolRunSecurityContext) and security_context.delegated_credential,
+                  client_runtime_context=client_runtime_context)):
             output = await _execute_tool_block_impl(
                 ToolBlock(transport, normalized.execution_input) if normalized is not None else block,
                 session_id=session_id,

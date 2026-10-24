@@ -79,6 +79,8 @@ logger = logging.getLogger(__name__)
 # ── Enforcement mode ────────────────────────────────────────────────────────
 MODE_ENFORCING = "enforcing"
 MODE_REPORT_ONLY = "report_only"
+# A per-action human decision, never a deployment-wide enforcement setting.
+MODE_HOST_APPROVED = "host_approved"
 
 #: Required containment must be established before model-controlled code runs.
 CONTAINMENT_MODE = MODE_ENFORCING
@@ -699,7 +701,7 @@ def probe(spec: ContainmentSpec) -> ContainmentProbe:
     )
 
 
-def acquire(spec: ContainmentSpec, *, owner: str) -> ContainmentGrant:
+def acquire(spec: ContainmentSpec, *, owner: str, host_approval=None) -> ContainmentGrant:
     """Establish containment, or refuse.
 
     Postcondition under :data:`MODE_ENFORCING`, asserted rather than assumed::
@@ -726,7 +728,14 @@ def acquire(spec: ContainmentSpec, *, owner: str) -> ContainmentGrant:
     missing_required = frozenset(spec.required) - enforced
     name = mechanism.name if mechanism else "none"
 
-    if missing_required and CONTAINMENT_MODE == MODE_ENFORCING:
+    host_authorized = False
+    if host_approval is not None:
+        from src.host_execution_approval import approved_host_action
+        host_authorized = approved_host_action(spec, owner=owner_id) is host_approval
+        if not host_authorized or missing_required - {FILESYSTEM, PROCESS_TREE}:
+            raise ValueError("Host execution requires a claimed exact human approval")
+
+    if missing_required and CONTAINMENT_MODE == MODE_ENFORCING and not host_authorized:
         # The command does not run. This is the whole point: "not executed" is
         # the one outcome a model cannot mistake for success.
         raise ContainmentUnavailable(missing_required, name)
@@ -740,10 +749,17 @@ def acquire(spec: ContainmentSpec, *, owner: str) -> ContainmentGrant:
         degraded=degraded,
         unenforced_required=tuple(sorted(missing_required)),
         owner=owner_id,
-        mode=CONTAINMENT_MODE,
+        mode=MODE_HOST_APPROVED if host_authorized else CONTAINMENT_MODE,
         spec=spec,
     )
-    if missing_required:
+    if host_authorized:
+        logger.warning(
+            "[host-approval] exact host execution owner=%s tool=%s approval=%s missing=%s; "
+            "filesystem and child-process access follows the OS account",
+            owner_id, host_approval.pending.tool_name, host_approval.pending.digest[:16],
+            sorted(missing_required),
+        )
+    elif missing_required:
         logger.warning(
             "containment: grant %s for owner %s is NOT contained — required %s "
             "not enforced by mechanism %s (report-only mode)",
@@ -755,6 +771,10 @@ def acquire(spec: ContainmentSpec, *, owner: str) -> ContainmentGrant:
             grant.id, sorted(enforced), list(degraded), name,
         )
     _write_record(grant)
+    if host_authorized:
+        from src.host_execution_approval import approval_scope
+        _update_record(grant.id, host_approval_digest=host_approval.pending.digest,
+                       host_approval_scope=approval_scope(host_approval))
     return grant
 
 
@@ -1032,7 +1052,12 @@ async def run(
     provided = mechanism.provides(grant.spec) if mechanism is not None else frozenset()
     missing |= frozenset(grant.spec.required) - provided
     overclaimed = frozenset(grant.enforced) - provided
-    if (missing or overclaimed) and grant.mode == MODE_ENFORCING:
+    if grant.mode == MODE_HOST_APPROVED:
+        from src.host_execution_approval import validate_host_grant
+        if overclaimed or missing - {FILESYSTEM, PROCESS_TREE}:
+            raise ContainmentUnavailable(missing | overclaimed, grant.mechanism)
+        validate_host_grant(grant)
+    elif (missing or overclaimed) and grant.mode == MODE_ENFORCING:
         raise ContainmentUnavailable(missing | overclaimed, grant.mechanism)
 
     spec = grant.spec

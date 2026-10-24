@@ -62,6 +62,7 @@ export function setWorkspace(path) {
   if (path) Storage.set(KEYS.WORKSPACE, path);
   else Storage.remove(KEYS.WORKSPACE);
   syncWorkspaceIndicator(path || '');
+  window.dispatchEvent(new CustomEvent('odysseus:workspace-changed', { detail: { path: path || '' } }));
 }
 
 /**

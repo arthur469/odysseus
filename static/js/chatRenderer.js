@@ -3053,6 +3053,14 @@ export function renderAskUserCard(payload, options) {
   card.appendChild(question);
   card.setAttribute('aria-labelledby', question.id);
 
+  if (isToolApproval && aq.action?.execution_profile === 'host_once' && aq.description) {
+    const warning = document.createElement('div');
+    warning.className = 'ask-user-option-desc';
+    warning.setAttribute('role', 'note');
+    warning.textContent = String(aq.description);
+    card.appendChild(warning);
+  }
+
   if (isToolApproval && aq.action) {
     const action = document.createElement('div');
     action.className = 'ask-user-option-desc';
