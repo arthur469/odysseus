@@ -360,6 +360,7 @@ function _scheduleLabel(task) {
     return `Every ${n} ${evtName}${n > 1 ? 's' : ''}`;
   }
   if (tt === 'webhook') return 'Webhook';
+  if (tt === 'manual') return 'Manuel uniquement';
   const t = task.scheduled_time || '00:00';
   if (task.schedule === 'cron') return `Cron: ${task.cron_expression || '?'}`;
   if (task.schedule === 'once') {
@@ -369,7 +370,7 @@ function _scheduleLabel(task) {
     }
     return 'Once';
   }
-  const localTime = _utcTimeToLocal(t);
+  const localTime = task.timezone ? `${t} (${task.timezone})` : _utcTimeToLocal(t);
   if (task.schedule === 'daily') return `Daily at ${localTime}`;
   if (task.schedule === 'weekly') {
     const day = DAYS_OF_WEEK[task.scheduled_day ?? 0];
@@ -438,9 +439,27 @@ function _absoluteTime(iso) {
 }
 
 function _statusDot(status) {
-  const colors = { active: '#4caf50', paused: '#ff9800', completed: '#888', error: '#f44336', failed: '#f44336' };
+  const colors = { active: '#4caf50', paused: '#ff9800', partial: '#fbbf24', completed: '#888', error: '#f44336', failed: '#f44336' };
   const c = colors[status] || '#888';
   return `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${c};box-shadow:0 0 6px ${c}, 0 0 3px ${c};flex-shrink:0;position:relative;top:4px;"></span>`;
+}
+
+function _runStatusLabel(status) {
+  return status === 'partial' ? 'Partially completed' : status;
+}
+
+function _runVisualStatus(entry) {
+  if (entry.status === 'partial') return 'partial';
+  if (['queued', 'running', 'skipped', 'aborted'].includes(entry.status)) return entry.status;
+  if (entry.status === 'error' || entry.status === 'failed') return 'error';
+  if (entry.status === 'success') return 'ok';
+  return _classifyResult(entry.result);
+}
+
+function _runResultText(run) {
+  const text = run.result || run.error || '—';
+  if (run.status === 'partial' || text.startsWith('Routine "')) return text;
+  return text.length > 300 ? text.slice(0, 300) + '…' : text;
 }
 
 const _TASK_ICONS = {
@@ -925,7 +944,7 @@ function _renderList() {
     const builtinBadge = task.is_builtin
       ? `<span class="task-builtin-badge${task.is_modified ? ' modified' : ''}" title="${task.is_modified ? 'Built-in task — edited from its default' : 'Built-in task'}">built-in${task.is_modified ? ' · edited' : ''}</span>`
       : '';
-    titleRow.innerHTML = `${_taskIcon(task)}<span class="memory-item-title">${_esc(task.name)}</span>${_taskAiMark(task)}${builtinBadge}<span style="flex:1;"></span>${statusBadge}<span class="doclib-card-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>`;
+    titleRow.innerHTML = `${_taskIcon(task)}<span class="memory-item-title">${_esc(task.name)}</span>${_taskAiMark(task)}${builtinBadge}<span style="flex:1;"></span>${task.last_run_status === 'partial' ? '<span class="task-partial-label">Partially completed</span>' : ''}${statusBadge}<span class="doclib-card-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>`;
 
     // ... menu button (hover to show)
     const actionsWrap = document.createElement('div');
@@ -1044,12 +1063,13 @@ function _renderList() {
     }
     if (task.last_run_status) {
       const isErr = task.last_run_status === 'error' || task.last_run_status === 'failed';
-      const color = isErr ? 'var(--red,#e06c75)' : 'var(--green,#50fa7b)';
+      const isPartial = task.last_run_status === 'partial';
+      const color = isPartial ? '#fbbf24' : isErr ? 'var(--red,#e06c75)' : 'var(--green,#50fa7b)';
       const result = (task.last_run_result || '').trim();
       const prev = result.length > 200 ? result.slice(0, 200) + '…' : result;
       const lr = document.createElement('div');
       lr.style.cssText = `font-size:11px;margin-bottom:6px;padding:4px 8px;border-left:2px solid ${color};background:color-mix(in srgb, ${color} 8%, transparent);border-radius:2px;line-height:1.4;cursor:pointer;`;
-      lr.innerHTML = `<span style="font-weight:600;color:${color};">${isErr ? '✗' : '✓'}</span> <span style="opacity:0.9;">${_esc(prev) || (isErr ? 'Failed (no detail)' : 'Success (no output)')}</span>`;
+      lr.innerHTML = `<span style="font-weight:600;color:${color};">${isPartial ? '◐' : isErr ? '✗' : '✓'}</span> <span style="opacity:0.9;">${_esc(prev) || (isErr ? 'Failed (no detail)' : 'Success (no output)')}</span>`;
       lr.title = 'Open full history';
       lr.addEventListener('click', (e) => { e.stopPropagation(); _showRunHistory(task.id, task.name); });
       detail.appendChild(lr);
@@ -1331,6 +1351,7 @@ function _showForm(existing, initTaskType, initTriggerType) {
 
       <label class="task-form-label">Trigger</label>
       <div class="task-form-toggle" id="task-form-trigger-toggle">
+        <button class="task-toggle-btn ${curTriggerType === 'manual' ? 'active' : ''}" data-val="manual" style="position:relative;top:-4px;">Manuel</button>
         <button class="task-toggle-btn ${curTriggerType === 'schedule' ? 'active' : ''}" data-val="schedule" style="position:relative;top:-4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Schedule</button>
         <button class="task-toggle-btn ${curTriggerType === 'event' ? 'active' : ''}" data-val="event" style="position:relative;top:-4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>Event</button>
         <button class="task-toggle-btn ${curTriggerType === 'webhook' ? 'active' : ''}" data-val="webhook" style="position:relative;top:-4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Webhook</button>
@@ -1411,6 +1432,15 @@ function _showForm(existing, initTaskType, initTriggerType) {
         const extra = document.getElementById('task-form-action-extra');
         if (!sel || !extra) return;
         const action = sel.value;
+        if (action === 'pc_executer_routine') {
+          extra.innerHTML = '<label class="task-form-label">Identifiant de la routine</label><input id="task-form-pc-routine" class="task-form-input" placeholder="mode_nuit" /><div class="memory-desc">Run now applique cette routine. Aucun modèle IA. Les nouvelles routines sont ajoutées par la synchronisation.</div>';
+          try { document.getElementById('task-form-pc-routine').value = JSON.parse(existing?.prompt || '{}').routine || ''; } catch (_) {}
+          return;
+        }
+        if (action === 'pc_synchroniser_routines') {
+          extra.innerHTML = '<div class="memory-desc">Ajoute une tâche manuelle pour chaque nouvelle routine. Conserve les tâches existantes et ne lance aucune routine. Aucun modèle IA.</div>';
+          return;
+        }
         if (!_EMAIL_ACCOUNT_ACTIONS.has(action)) {
           extra.innerHTML = '';
           return;
@@ -1491,6 +1521,7 @@ function _showForm(existing, initTaskType, initTriggerType) {
         d.setUTCHours(uh, um, 0, 0);
         initH = d.getHours();
         initM = d.getMinutes();
+        if (existing.timezone) { initH = uh; initM = um; }
       }
       _buildTimePicker('task-form-time-wrap', initH, initM);
 
@@ -1818,6 +1849,15 @@ function _showForm(existing, initTaskType, initTriggerType) {
         return;
       }
       payload.action = action;
+      if (action === 'pc_executer_routine') {
+        const routine = document.getElementById('task-form-pc-routine')?.value?.trim() || '';
+        if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(routine)) {
+          if (uiModule) uiModule.showError('Identifiant de routine invalide');
+          return;
+        }
+        payload.prompt = JSON.stringify({routine});
+      }
+      if (action === 'pc_synchroniser_routines') payload.prompt = '';
       if (_EMAIL_ACCOUNT_ACTIONS.has(action)) {
         const accountId = document.getElementById('task-form-email-account')?.value || '';
         payload.prompt = accountId ? JSON.stringify({ account_id: accountId }) : '';
@@ -1847,7 +1887,7 @@ function _showForm(existing, initTaskType, initTriggerType) {
         payload.cron_expression = cronVal;
       } else {
         const timeVal = _getTimePickerValue('task-form-time-wrap');
-        payload.scheduled_time = _localTimeToUtc(timeVal);
+        payload.scheduled_time = payload.action === 'check_odysseus_updates' ? timeVal : _localTimeToUtc(timeVal);
 
         const dayInput = document.getElementById('task-form-day');
         if (dayInput) payload.scheduled_day = parseInt(dayInput.value, 10);
@@ -1913,15 +1953,15 @@ async function _showRunHistory(taskId, taskName) {
   } else {
     html += '<div class="task-runs-list">';
     for (const run of runs) {
-      const statusClass = run.status === 'success' ? 'task-run-success' : (run.status === 'error' || run.status === 'failed') ? 'task-run-error' : 'task-run-running';
+      const statusClass = run.status === 'partial' ? 'task-run-partial' : run.status === 'success' ? 'task-run-success' : (run.status === 'error' || run.status === 'failed') ? 'task-run-error' : 'task-run-running';
       html += `<div class="task-run-item ${statusClass}">
         <div class="task-run-item-header">
           ${_statusDot(run.status === 'success' ? 'active' : run.status)}
-          <span>${run.status}</span>
+          <span>${_esc(_runStatusLabel(run.status))}</span>
           ${run.model ? `<span class="task-run-model" style="font-size:10px;opacity:0.5;">${_esc(run.model.split('/').pop())}</span>` : ''}
           <span class="task-run-time" title="${run.started_at ? _esc(_relativeTime(run.started_at)) : ''}">${run.started_at ? _absoluteTime(run.started_at) : ''}</span>
         </div>
-        <div class="task-run-result">${_esc(run.result ? (run.result.length > 300 ? run.result.slice(0, 300) + '…' : run.result) : run.error || '—')}</div>
+        <div class="task-run-result">${_esc(_runResultText(run))}</div>
       </div>`;
     }
     html += '</div>';
@@ -2101,6 +2141,7 @@ function _syncPauseAllButton() {
 let _activeTab = 'tasks';
 
 function _switchTab(tab) {
+  _stopActivityRefresh();
   _activeTab = tab;
   const modal = document.getElementById('tasks-modal');
   if (!modal) return;
@@ -2123,6 +2164,7 @@ function _runToActivityEntry(r) {
   }
   return {
     kind: r.task_type || 'llm',
+    runId: r.id || '',
     taskName: r.task_name || (r.task_type === 'action' ? (r.action || 'Action') : 'Task'),
     taskId: r.task_id,
     action: r.action || '',
@@ -2172,9 +2214,11 @@ async function _renderCompletedView() {
     const res = await fetch(`${API_BASE}/api/tasks/runs/recent?limit=${_completedLimit}&max_result_chars=10000`, { credentials: 'same-origin' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
+    // A response belongs to the list that requested it, even after tab changes.
+    if (!list?.isConnected) return;
     const finished = (data.runs || []).map(_runToActivityEntry).filter(_isChatResultRun);
     _completedHasMore = !!data.has_more && _completedLimit < 200;
-    _activityEntries = finished;
+    _completedEntries = finished;
     _syncCompletedTabCount(finished.length);
     if (!list) return;
     if (finished.length === 0) {
@@ -2207,7 +2251,8 @@ async function _renderCompletedView() {
 
 // ---- Activity view (assistant session log) ----
 
-async function _renderActivityView() {
+async function _renderActivityView({ query = '', solo = null } = {}) {
+  _stopActivityRefresh();
   const modal = document.getElementById('tasks-modal');
   const body = modal?.querySelector('.modal-body');
   if (!body) return;
@@ -2226,18 +2271,17 @@ async function _renderActivityView() {
     </div>
   `;
 
-  document.getElementById('tasks-activity-refresh').addEventListener('click', _renderActivityView);
+  document.getElementById('tasks-activity-refresh').addEventListener('click', () =>
+    _renderActivityView({ query: _afQuery, solo: _solo }));
 
   // Solo filter: clicking a chip shows ONLY that group (a category, or
   // Errors). Clicking the active chip again clears the filter (show all).
   // At most one chip is active at a time. _solo holds the active key, or null.
-  let _afQuery = '';
-  let _solo = null;  // 'cat:<Category>' | 'status:error' | null
+  let _afQuery = query;
+  let _solo = solo;  // 'cat:<Category>' | 'status:error' | null
 
   const _entryCat = (e) => _categoryLabel(e.taskName);
-  const _entryStatus = (e) =>
-    (e.status === 'success' || _classifyResult(e.result) === 'ok') ? 'ok'
-    : (e.status === 'error' || e.status === 'failed' || _classifyResult(e.result) === 'error') ? 'error' : 'info';
+  const _entryStatus = (e) => _runVisualStatus(e);
   const _isNotification = (e) => e.output_target === 'notification';
 
   const _matchesSolo = (e) => {
@@ -2248,12 +2292,17 @@ async function _renderActivityView() {
     if (_solo === 'notifications') return _isNotification(e);
     if (_solo.startsWith('cat:')) return _entryCat(e) === _solo.slice(4);
     if (_solo === 'status:error') return _entryStatus(e) === 'error';
+    if (_solo === 'status:partial') return _entryStatus(e) === 'partial';
     return true;
   };
 
   const _applyFilter = () => {
     const list = document.getElementById('tasks-activity-list');
     if (!list) return;
+    const scrollTop = list.scrollTop;
+    const expanded = new Set(Array.from(list.querySelectorAll('.task-log-row.expanded'))
+      .map(row => row.dataset.runId).filter(Boolean));
+    list.querySelectorAll('.task-log-row').forEach(unbindExpandedCardDismiss);
     const q = _afQuery.trim().toLowerCase();
     const filtered = _activityEntries.filter(e => {
       if (!_matchesSolo(e)) return false;
@@ -2262,10 +2311,11 @@ async function _renderActivityView() {
     });
     if (filtered.length === 0) {
       list.innerHTML = '<div style="opacity:0.5;padding:12px;">No matching activity.</div>';
-      return;
+    } else {
+      list.innerHTML = _stackActivityEntries(filtered)
+        .map(entry => _renderActivityEntry(entry, { expanded: expanded.has(entry.runId) })).join('');
     }
-    list.innerHTML = _stackActivityEntries(filtered).map(_renderActivityEntry).join('');
-    if (_activityHasMore && !q) {
+    if (_activityHasMore) {
       list.insertAdjacentHTML('beforeend', `
         <button type="button" class="memory-toolbar-btn tasks-activity-load-more" id="tasks-activity-load-more" style="width:100%;justify-content:center;margin-top:6px;">
           Load more
@@ -2273,10 +2323,11 @@ async function _renderActivityView() {
       `);
       list.querySelector('#tasks-activity-load-more')?.addEventListener('click', () => {
         _activityLimit = Math.min(200, _activityLimit + 40);
-        _renderActivityView();
+        _renderActivityView({ query: _afQuery, solo: _solo });
       });
     }
     _wireActivityRows(list);
+    list.scrollTop = scrollTop;
   };
 
   const _buildChips = () => {
@@ -2291,6 +2342,7 @@ async function _renderActivityView() {
       if (!cats.includes(c)) cats.push(c);
     }
     const hasErrors = _activityEntries.some(e => !_isNotification(e) && _entryStatus(e) === 'error');
+    const hasPartial = _activityEntries.some(e => !_isNotification(e) && _entryStatus(e) === 'partial');
     // Count notifications that would actually display under the chip — applies
     // the active search query so the badge matches what you'd see, not a
     // misleading total.
@@ -2309,6 +2361,9 @@ async function _renderActivityView() {
     if (hasErrors) {
       html += `<button class="${cls(_solo === 'status:error')}" data-key="status:error">errors</button>`;
     }
+    if (hasPartial) {
+      html += `<button class="${cls(_solo === 'status:partial')}" data-key="status:partial">Partially completed</button>`;
+    }
     if (notifCount) {
       html += `<button class="${cls(_solo === 'notifications')}" data-key="notifications">notifications <span style="opacity:0.6;font-weight:normal;">${notifCount}</span></button>`;
     }
@@ -2324,6 +2379,7 @@ async function _renderActivityView() {
   };
 
   const searchEl = document.getElementById('tasks-activity-search');
+  if (searchEl) searchEl.value = _afQuery;
   if (searchEl) searchEl.addEventListener('input', () => { _afQuery = searchEl.value; _buildChips(); _applyFilter(); });
 
   const _actList = document.getElementById('tasks-activity-list');
@@ -2334,29 +2390,47 @@ async function _renderActivityView() {
     _actList.appendChild(spinnerModule.createLoadingRow('Loading…'));
   }
 
-  try {
-    const res = await fetch(`${API_BASE}/api/tasks/runs/recent?limit=${_activityLimit}&max_result_chars=6000`, { credentials: 'same-origin' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    const runs = data.runs || [];
-    _activityHasMore = !!data.has_more && _activityLimit < 200;
-    const list = document.getElementById('tasks-activity-list');
-    if (!list) return;
-    if (runs.length === 0) {
-      list.innerHTML = '<div style="opacity:0.5;padding:12px;">No activity yet. Scheduled tasks will log here once they run.</div>';
-      return;
+  // Only this mounted list may consume its response or schedule another read.
+  const _isCurrent = () => _open && _activeTab === 'activity' && _actList?.isConnected;
+  const _scheduleNext = () => {
+    if (!_isCurrent()) return;
+    _activityRefreshTimeout = setTimeout(() => {
+      if (!_isCurrent()) return;
+      if (document.hidden) _scheduleNext();
+      else _loadActivity();
+    }, 5000);
+  };
+  async function _loadActivity() {
+    try {
+      const res = await fetch(`${API_BASE}/api/tasks/runs/recent?limit=${_activityLimit}&max_result_chars=6000`, { credentials: 'same-origin' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (!_isCurrent()) return;
+      const runs = data.runs || [];
+      _activityHasMore = !!data.has_more && _activityLimit < 200;
+      _activityEntries = runs.map(_runToActivityEntry);
+      _syncCompletedTabCount(_activityEntries.filter(_isChatResultRun).length);
+      _buildChips();
+      if (runs.length === 0) {
+        _actList.innerHTML = '<div style="opacity:0.5;padding:12px;">No activity yet. Scheduled tasks will log here once they run.</div>';
+      } else {
+        _applyFilter();
+      }
+      _scheduleNext();
+    } catch (e) {
+      if (_isCurrent()) _actList.innerHTML = `<div style="opacity:0.5;padding:12px;">Failed to load activity: ${_escHtml(e.message || String(e))}</div>`;
     }
-    _activityEntries = runs.map(_runToActivityEntry);
-    _syncCompletedTabCount(_activityEntries.filter(_isChatResultRun).length);
-    _buildChips();
-    _applyFilter();
-  } catch (e) {
-    const list = document.getElementById('tasks-activity-list');
-    if (list) list.innerHTML = `<div style="opacity:0.5;padding:12px;">Failed to load activity: ${_escHtml(e.message || String(e))}</div>`;
   }
+  await _loadActivity();
 }
 
 let _activityEntries = [];
+let _completedEntries = [];
+let _activityRefreshTimeout = null;
+function _stopActivityRefresh() {
+  clearTimeout(_activityRefreshTimeout);
+  _activityRefreshTimeout = null;
+}
 let _activityLimit = 40;
 let _activityHasMore = false;
 let _completedLimit = 40;
@@ -2473,6 +2547,12 @@ function _wireActivityRows(list) {
   // counter). No-op when there's nothing to tick.
   _startActivityTimers(list);
   list.querySelectorAll('.task-log-row').forEach(row => {
+    if (row.classList.contains('expanded')) {
+      bindExpandedCardDismiss(row, () => {
+        unbindExpandedCardDismiss(row);
+        row.classList.remove('expanded');
+      }, 'expanded');
+    }
     const toggleRow = () => {
       const open = !row.classList.contains('expanded');
       row.classList.toggle('expanded', open);
@@ -2552,7 +2632,7 @@ function _wireActivityRows(list) {
 }
 
 function _renderCompletedPreviewEntry(entry) {
-  const entryIdx = _activityEntries.indexOf(entry);
+  const entryIdx = _completedEntries.indexOf(entry);
   const tsLabel = _relativeTime(entry.ts);
   const tsAbs = entry.ts ? new Date(entry.ts).toLocaleString() : '';
   const modelTag = entry.model
@@ -2617,7 +2697,7 @@ function _wireCompletedPreviewRows(list) {
       e.stopPropagation();
       const row = btn.closest('.task-completed-preview-row');
       const idx = parseInt(row?.dataset.entryIdx || '-1', 10);
-      const entry = _activityEntries[idx];
+      const entry = _completedEntries[idx];
       if (entry?.researchId) {
         window.open(`${API_BASE}/api/research/report/${encodeURIComponent(entry.researchId)}`, '_blank');
       }
@@ -2628,7 +2708,7 @@ function _wireCompletedPreviewRows(list) {
       e.stopPropagation();
       const row = btn.closest('.task-completed-preview-row');
       const idx = parseInt(row?.dataset.entryIdx || '-1', 10);
-      const entry = _activityEntries[idx];
+      const entry = _completedEntries[idx];
       if (entry) _openResultInChat(entry);
     });
   });
@@ -2637,7 +2717,7 @@ function _wireCompletedPreviewRows(list) {
       e.stopPropagation();
       const row = btn.closest('.task-completed-preview-row');
       const idx = parseInt(row?.dataset.entryIdx || '-1', 10);
-      const entry = _activityEntries[idx];
+      const entry = _completedEntries[idx];
       if (!entry) return;
       try {
         uiModule.copyToClipboard((entry.result || '').trim());
@@ -2792,20 +2872,11 @@ function _renderActivityEntry(entry, opts = {}) {
   // Prefer the run's own status (queued / running / success / error / skipped)
   // over heuristic text classification. Fall back to text-scan for older
   // rows where entry.status is missing.
-  let status;
-  if (entry.status === 'queued' || entry.status === 'running' || entry.status === 'skipped' || entry.status === 'aborted') {
-    status = entry.status;
-  } else if (entry.status === 'error' || entry.status === 'failed') {
-    status = 'error';
-  } else if (entry.status === 'success') {
-    status = 'ok';
-  } else {
-    status = _classifyResult(entry.result);
-  }
-  const statusDot = `<span class="task-log-status task-log-status-${status}" title="${status}"></span>`;
+  const status = _runVisualStatus(entry);
+  const statusDot = `<span class="task-log-status task-log-status-${status}" title="${_esc(_runStatusLabel(status))}"></span>`;
   const failedTag = status === 'error'
     ? '<span class="task-log-failed-tag">(failed)</span>'
-    : '';
+    : status === 'partial' ? '<span class="task-log-partial-tag">Partially completed</span>' : '';
   // Render the result through markdown so code blocks, lists, links look right.
   let resultHtml;
   const _isRunning = entry.status === 'running' || entry.status === 'queued';
@@ -2844,7 +2915,7 @@ function _renderActivityEntry(entry, opts = {}) {
   const promptHtml = entry.prompt
     ? `<details class="task-log-prompt"><summary>Prompt</summary><pre>${_escHtml(entry.prompt)}</pre></details>`
     : '';
-  const hue = status === 'error' ? 0 : _categoryHue(entry.taskName, entry.kind);
+  const hue = status === 'partial' ? 40 : status === 'error' ? 0 : _categoryHue(entry.taskName, entry.kind);
   const rowStatusClass = ` task-log-row-${status}`;
   // CSS vars feed the colored title + accent stripe.
   const styleVars = `--cat-hue:${hue};`;
@@ -2922,7 +2993,7 @@ function _renderActivityEntry(entry, opts = {}) {
   if (_isSkipped) {
     const reason = (entry.result || '').trim();
     return `
-      <div class="task-log-row is-skipped${rowStatusClass}" data-kind="${_escHtml(entry.kind)}" data-entry-idx="${entryIdx}" style="${styleVars}">
+      <div class="task-log-row is-skipped${rowStatusClass}" data-kind="${_escHtml(entry.kind)}" data-run-id="${_escHtml(entry.runId || '')}" data-entry-idx="${entryIdx}" style="${styleVars}">
         <div class="task-log-row-head">
           ${statusDot}
           <span class="task-log-task-icon">${_taskIcon({ action: entry.action, task_type: entry.kind })}</span>
@@ -2935,7 +3006,7 @@ function _renderActivityEntry(entry, opts = {}) {
     `;
   }
   return `
-    <div class="task-log-row${rowStatusClass}${long ? ' is-long' : ''}${_isRunning ? ' is-running' : ''}${opts.expanded ? ' expanded' : ''}" data-kind="${_escHtml(entry.kind)}" data-entry-idx="${entryIdx}" style="${styleVars}">
+    <div class="task-log-row${rowStatusClass}${long ? ' is-long' : ''}${_isRunning ? ' is-running' : ''}${opts.expanded ? ' expanded' : ''}" data-kind="${_escHtml(entry.kind)}" data-run-id="${_escHtml(entry.runId || '')}" data-entry-idx="${entryIdx}" style="${styleVars}">
       <div class="task-log-row-head">
         ${statusDot}
         <span class="task-log-task-icon">${_taskIcon({ action: entry.action, task_type: entry.kind })}</span>
@@ -3325,6 +3396,7 @@ function _focusTask(taskId, { expand = false } = {}) {
 }
 
 export function closeTasks() {
+  _stopActivityRefresh();
   if (!_open) return;
   _open = false;
   _viewingRuns = null;
@@ -3377,6 +3449,19 @@ async function _pollTaskNotifications() {
         } else {
           _setTaskCompletionPending(true);
         }
+      }
+      if (!ok && n.task_id === 'journal-ia-daily-local' && uiModule) {
+        _setTaskFailurePending(true);
+        uiModule.showToast((n.task_name || 'Journal-IA') + ': ' + (n.body || 'The summary is still pending.'), {
+          duration: 20000, toastClass: 'error', action: 'Retry',
+          onAction: async () => {
+            try {
+              await _runNow('journal-ia-daily-local');
+              uiModule.showToast('Journal-IA: retry requested. Follow progress in Tasks → Activity.');
+            } catch (error) { uiModule.showError(error.message || 'Unable to retry'); }
+          },
+        });
+        continue;
       }
       // Tasks with output_target='notification' carry the result text in `body`
       // — show it as a real browser Notification (richer than a toast). Falls

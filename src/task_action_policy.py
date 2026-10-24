@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 ADMIN_ONLY_TASK_ACTIONS = frozenset({
+    "check_odysseus_updates",
+    "journal_ia",
+    "pc_executer_routine",
+    "pc_synchroniser_routines",
     "run_local",
     "run_script",
     "ssh_command",

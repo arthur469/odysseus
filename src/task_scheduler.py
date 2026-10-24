@@ -245,6 +245,10 @@ def compute_next_run(schedule: str, scheduled_time: str,
 
 def _resolve_task_timezone(db, task) -> str | None:
     """Look up the IANA timezone name for a task via its linked CrewMember, if any."""
+    from src.update_check import action_timezone
+    update_timezone = action_timezone(getattr(task, "action", None))
+    if update_timezone:
+        return update_timezone
     if not getattr(task, "crew_member_id", None):
         return None
     try:
@@ -406,6 +410,29 @@ class TaskScheduler:
         self._concurrency_cap = 1
         self._task_handles = {}
 
+    def _manual_run_counts(self) -> dict:
+        """Count overlapping user-initiated runs, following upstream PR #6262."""
+        return self.__dict__.setdefault("_user_initiated_runs", {})
+
+    def _mark_user_initiated(self, task_id: str):
+        counts = self._manual_run_counts()
+        counts[task_id] = counts.get(task_id, 0) + 1
+
+    def _clear_user_initiated(self, task_id: str):
+        counts = self._manual_run_counts()
+        remaining = counts.get(task_id, 0) - 1
+        if remaining > 0:
+            counts[task_id] = remaining
+        else:
+            counts.pop(task_id, None)
+
+    def _is_user_initiated(self, task_id: str) -> bool:
+        return self._manual_run_counts().get(task_id, 0) > 0
+
+    def _foreground_stopped(self) -> set:
+        """Remember foreground pre-emption separately from an explicit Stop."""
+        return self.__dict__.setdefault("_fg_stopped", set())
+
     @contextlib.asynccontextmanager
     async def _executing_guard(self):
         # This scheduler can be touched by request handlers, event-bus tasks,
@@ -460,7 +487,8 @@ class TaskScheduler:
                     return False
                 run.status = "aborted"
                 run.error = message
-                run.result = run.result or message
+                if not run.result or run.result.startswith(("Starting", "Queued", "_Queued")):
+                    run.result = message
                 run.finished_at = _utcnow()
                 db.commit()
                 return True
@@ -478,7 +506,8 @@ class TaskScheduler:
             if run:
                 run.status = 'aborted'
                 run.error = message
-                run.result = run.result or message
+                if not run.result or run.result.startswith(("Starting", "Queued", "_Queued")):
+                    run.result = message
                 run.finished_at = _utcnow()
             task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
             if task:
@@ -547,6 +576,12 @@ class TaskScheduler:
         or when no owner filter is given — preserves backward behaviour
         for the legacy single-user deploy.
         """
+        if owner is not None:
+            try:
+                from src.journal_ia_action import flush_journal_notifications
+                flush_journal_notifications(self.add_notification, owner)
+            except Exception:
+                logger.warning("Could not deliver Journal-IA incident alerts", exc_info=True)
         if owner is None:
             notes = self._pending_notifications[:]
             self._pending_notifications.clear()
@@ -837,7 +872,8 @@ class TaskScheduler:
                 for task in due:
                     if task.id in self._executing:
                         continue
-                    if foreground_active:
+                    if foreground_active and not (task.task_type == "action" and task.action in {
+                        "pc_executer_routine", "pc_synchroniser_routines", "journal_ia"}):
                         task.next_run = now + timedelta(minutes=15)
                         continue
                     self._executing.add(task.id)
@@ -849,7 +885,7 @@ class TaskScheduler:
         finally:
             db.close()
 
-    async def _execute_task(self, task_id: str, *, bypass_model_slot: bool = False, release_executing: bool = True):
+    async def _execute_task(self, task_id: str, *, bypass_model_slot: bool = False, release_executing: bool = True, user_initiated: bool = False):
         # Create the run record with status="queued" BEFORE waiting on the
         # semaphore so the UI can show that a manually-triggered task is in
         # line behind another. Once we acquire the slot, flip to "running"
@@ -881,7 +917,7 @@ class TaskScheduler:
                     task_id,
                     run_id,
                     release_executing=release_executing,
-                    gate_foreground=not bypass_model_slot,
+                    gate_foreground=not (bypass_model_slot or user_initiated) and not self._task_is_pc_action(task_id),
                 )
                 return
 
@@ -890,20 +926,25 @@ class TaskScheduler:
                     task_id,
                     run_id,
                     release_executing=release_executing,
-                    gate_foreground=True,
+                    gate_foreground=not user_initiated,
                 )
         except asyncio.CancelledError:
             # If cancellation happens while queued behind the semaphore,
             # _execute_task_locked never runs and cannot update the Activity row.
-            await asyncio.to_thread(self._mark_run_aborted, task_id, run_id)
+            message = ("Paused because Odysseus became active"
+                       if task_id in self._foreground_stopped() else "Stopped by user")
+            await asyncio.to_thread(self._mark_run_aborted, task_id, run_id, message)
             await asyncio.to_thread(
                 self._defer_immediately_due_task, task_id, delay=timedelta(minutes=15),
             )
             raise
         finally:
+            self._foreground_stopped().discard(task_id)
             handle = self._task_handles.get(task_id)
             if handle is current:
                 self._task_handles.pop(task_id, None)
+            if user_initiated:
+                self._clear_user_initiated(task_id)
             if release_executing:
                 async with self._executing_guard():
                     self._executing.discard(task_id)
@@ -1039,9 +1080,17 @@ class TaskScheduler:
                 if task_type == "action":
                     result, success = await self._execute_action(task, run_id=run_id)
                     run.status = "success" if success else "error"
+                    if task.action == "pc_executer_routine":
+                        from src.pc_automations import task_run_outcome
+                        run.status, result = task_run_outcome(result, success)
+                    elif task.action == "journal_ia":
+                        from src.journal_ia_action import task_run_outcome
+                        run.status, result = task_run_outcome(result, success)
                     run.result = result
-                    if not success:
+                    if run.status == "error":
                         run.error = result
+                    else:
+                        run.error = None
                 elif task_type == "research":
                     result = await self._execute_research_task(task, db)
                     run.status = "success"
@@ -1054,7 +1103,7 @@ class TaskScheduler:
                 # Record which model actually ran (resolved inside the executor).
                 if getattr(self, "_last_run_model", None):
                     run.model = self._last_run_model
-                if run.status == "success":
+                if run.status in {"success", "partial"}:
                     await self._deliver_task_result(task, result, db, model=getattr(self, "_last_run_model", None))
             except TaskDeferred as defer:
                 count = self._task_defer_counts.get(task_id, 0) + 1
@@ -1074,6 +1123,8 @@ class TaskScheduler:
                 db.commit()
                 return
             except asyncio.CancelledError:
+                if task_id in self._foreground_stopped():
+                    foreground_cancel["hit"] = True
                 msg = (
                     "Paused because Odysseus became active"
                     if foreground_cancel.get("hit")
@@ -1112,6 +1163,7 @@ class TaskScheduler:
                 db.commit()
                 return
             finally:
+                self._foreground_stopped().discard(task_id)
                 if foreground_monitor and not foreground_monitor.done():
                     foreground_monitor.cancel()
                     try:
@@ -1159,7 +1211,7 @@ class TaskScheduler:
                     owner=task.owner,
                     body=run.result if output == "notification" else None,
                 )
-            elif run.status == "error":
+            elif run.status == "error" and task.action not in {"journal_ia", "check_odysseus_updates"}:
                 self.add_notification(
                     task.name,
                     "error",
@@ -1172,7 +1224,7 @@ class TaskScheduler:
             # Skip skipped/error rows — user shouldn't see "skipped: …" noise
             # for cron tasks that no-op'd, or duplicate error spam for tasks
             # that already fired an error notification above.
-            if run.status == "success":
+            if run.status in {"success", "partial"}:
                 self._log_to_assistant(db, task, run.result or "[success]")
 
             # Task chaining — trigger the next task on success
@@ -1205,7 +1257,7 @@ class TaskScheduler:
                 _t_for_notify = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
                 _should_notify_error = (
                     bool(_t_for_notify)
-                    and (_t_for_notify.task_type or "llm") in {"llm", "research"}
+                    and ((_t_for_notify.task_type or "llm") in {"llm", "research"} or _t_for_notify.action == "journal_ia")
                     and getattr(_t_for_notify, "notifications_enabled", True)
                 )
             except Exception:
@@ -1216,7 +1268,7 @@ class TaskScheduler:
                 # Persist the actual exception message so the UI can show it
                 err_text = f"{type(exec_exc).__name__}: {exec_exc}"
                 run_obj = db.query(TaskRun).filter(TaskRun.id == run_id).first()
-                if run_obj and run_obj.status in ("running", "success"):
+                if run_obj and run_obj.status in ("running", "success", "partial"):
                     run_obj.status = "error"
                     run_obj.error = err_text[:2000]
                     run_obj.finished_at = _utcnow()
@@ -1283,6 +1335,8 @@ class TaskScheduler:
     # content) — don't pollute the assistant chat session with their summaries.
     # Activity log + reminder email already carry everything the user needs.
     _SILENT_ACTIONS = frozenset({
+        "check_odysseus_updates",
+        "journal_ia",
         "check_email_urgency",
         "learn_sender_signatures",
         "summarize_emails",
@@ -1310,6 +1364,18 @@ class TaskScheduler:
         "audit_skills",
         "consolidate_memory",
     })
+
+    def _task_is_pc_action(self, task_id: str) -> bool:
+        """Les actions PC explicites ne dépendent pas de l'inactivité du chat.
+
+        Leur annulation à l'ouverture de l'interface pourrait interrompre une routine.
+        Les contrôles de compte, d'autorité et le bouton Stop restent appliqués.
+        """
+        from core.database import SessionLocal, ScheduledTask
+        with SessionLocal() as db:
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            return bool(task and task.task_type == "action" and task.action in {
+                "pc_executer_routine", "pc_synchroniser_routines", "journal_ia"})
 
     def _task_needs_model_slot(self, task_id: str) -> bool:
         """Only LLM/research/model-backed actions should wait in the model
@@ -1369,6 +1435,15 @@ class TaskScheduler:
                 self._set_run_progress(run_id, message)
 
             kwargs = {"owner": task.owner, "task_name": task.name, "progress_cb": _progress}
+            if task.action == "audit_skills":
+                kwargs["user_initiated"] = self._is_user_initiated(task.id)
+            if task.action == "check_odysseus_updates":
+                def _notify_update(body):
+                    if not getattr(task, "notifications_enabled", True):
+                        return False
+                    self.add_notification(task.name, "success", task.id, owner=task.owner, body=body)
+                    return True
+                kwargs["notify"] = _notify_update
             if task.prompt:
                 kwargs["prompt"] = task.prompt
             if task.action in ("run_script", "run_local", "ssh_command") and task.prompt:
@@ -2058,7 +2133,7 @@ class TaskScheduler:
                 disabled_tools=disabled_tools,
                 relevant_tools=relevant_tools,
                 fallbacks=_task_fallbacks,
-                workload="background",
+                workload="foreground" if self._is_user_initiated(getattr(task, "id", None)) else "background",
                 request_authority=request_authority,
         )) as agent_stream:
             async for event_str in agent_stream:
@@ -2414,13 +2489,16 @@ class TaskScheduler:
     async def run_task_now(self, task_id: str, *, force: bool = False):
         """Manually trigger a task execution."""
         if force:
-            asyncio.create_task(self._execute_task(task_id, bypass_model_slot=True, release_executing=False))
+            async with self._executing_guard():
+                self._mark_user_initiated(task_id)
+            asyncio.create_task(self._execute_task(task_id, bypass_model_slot=True, release_executing=False, user_initiated=True))
             return True
         async with self._executing_guard():
             if task_id in self._executing:
                 return False
             self._executing.add(task_id)
-        asyncio.create_task(self._execute_task(task_id))
+            self._mark_user_initiated(task_id)
+        asyncio.create_task(self._execute_task(task_id, user_initiated=True))
         return True
 
     async def stop_task(self, task_id: str) -> bool:
@@ -2446,15 +2524,17 @@ class TaskScheduler:
 
         This is intentionally blunt for scheduled/background work: when the
         user opens or uses Odysseus, foreground interaction wins immediately.
-        Manual force-runs can be restarted by the user; automatic jobs will be
-        deferred by their cancellation path instead of stealing the app.
+        User-initiated runs survive the activity that requested them. Automatic
+        jobs are deferred by their cancellation path instead of stealing the app.
         """
         async with self._executing_guard():
-            task_ids = list(self._executing)
+            task_ids = [tid for tid in self._executing if not self._is_user_initiated(tid)]
+        task_ids = [task_id for task_id in task_ids if not self._task_is_pc_action(task_id)]
         stopped = 0
         for task_id in task_ids:
             handle = self._task_handles.get(task_id)
             if handle and not handle.done():
+                self._foreground_stopped().add(task_id)
                 if not handle.cancelling():
                     handle.cancel()
                 stopped += 1
@@ -2462,7 +2542,10 @@ class TaskScheduler:
         # writer must not stall the foreground request's event loop, or delay
         # cancellation of the remaining background work.
         for task_id in task_ids:
-            if await asyncio.to_thread(self._mark_run_aborted, task_id):
+            if await asyncio.to_thread(
+                self._mark_run_aborted, task_id,
+                message="Paused because Odysseus became active",
+            ):
                 stopped += 1
         if stopped:
             logger.info("Stopped %d background scheduler task(s): %s", stopped, reason)
@@ -2574,12 +2657,13 @@ class TaskScheduler:
                 if not defs:
                     continue
                 legacy_names = set(defs.get("legacy_names") or [])
-                if (task.name or "") in legacy_names:
+                legacy_definition = (task.name or "") in legacy_names
+                if legacy_definition:
                     task.name = defs["name"]
                     renamed.append(task.action)
                 normalized = False
                 desired_trigger = defs.get("trigger_type", "schedule")
-                if task.action == "check_email_urgency":
+                if task.action == "check_email_urgency" and legacy_definition:
                     old_crons = set(defs.get("old_cron_expressions") or [])
                     if task.schedule == "cron" and (task.cron_expression or "") in old_crons:
                         task.cron_expression = defs["cron_expression"]
@@ -2591,16 +2675,10 @@ class TaskScheduler:
                         normalized = True
                 if desired_trigger == "schedule" and (
                     (task.trigger_type or "schedule") != "schedule"
-                    or task.trigger_event is not None
-                    or task.trigger_count is not None
-                    or task.schedule != defs.get("schedule")
-                    or task.scheduled_time != defs.get("scheduled_time")
-                    or task.scheduled_date is not None
-                    or task.cron_expression != defs.get("cron_expression")
+                    or task.schedule is None
                 ):
-                    # Migrate older event-based housekeeping tasks to their
-                    # current scheduled definition. Keep the user's status;
-                    # only replace the trigger configuration.
+                    # Migrate obsolete event definitions, but preserve valid
+                    # schedules saved by the user. Defaults are not overrides.
                     task.trigger_type = "schedule"
                     task.trigger_event = None
                     task.trigger_count = None

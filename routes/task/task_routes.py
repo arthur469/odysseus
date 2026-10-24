@@ -21,6 +21,7 @@ from src.task_action_policy import (
     owner_has_admin_task_privileges,
 )
 from src.task_scheduler import compute_next_run, HOUSEKEEPING_DEFAULTS
+from src.update_check import action_timezone
 from routes.prefs_routes import _load_for_user, _save_for_user
 
 logger = logging.getLogger(__name__)
@@ -206,6 +207,7 @@ def _task_to_dict(t: ScheduledTask, include_last_run_result: bool = False) -> di
         "action": t.action,
         "schedule": t.schedule,
         "scheduled_time": t.scheduled_time,
+        "timezone": action_timezone(t.action),
         "scheduled_day": t.scheduled_day,
         "scheduled_date": t.scheduled_date.isoformat() + "Z" if t.scheduled_date else None,
         "cron_expression": t.cron_expression,
@@ -423,6 +425,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                             task.scheduled_day,
                             task.scheduled_date,
                             cron_expression=task.cron_expression,
+                            tz_name=action_timezone(task.action),
                         )
                     resumed += 1
                 db.commit()
@@ -509,6 +512,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 req.schedule, req.scheduled_time,
                 req.scheduled_day, sched_date,
                 cron_expression=req.cron_expression,
+                tz_name=action_timezone(req.action),
             )
 
         # Generate webhook token if needed
@@ -559,7 +563,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 trigger_count=req.trigger_count,
                 trigger_counter=0,
                 next_run=next_run,
-                status="active" if (req.trigger_type in ("event", "webhook") or next_run) else "completed",
+                status="active" if (req.trigger_type in ("manual", "event", "webhook") or next_run) else "completed",
                 output_target=req.output_target,
                 model=req.model or None,
                 endpoint_url=endpoint_url,
@@ -823,6 +827,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                     task.schedule, task.scheduled_time,
                     task.scheduled_day, task.scheduled_date,
                     cron_expression=task.cron_expression,
+                    tz_name=action_timezone(task.action),
                 )
 
             db.commit()
@@ -886,6 +891,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                     task.schedule, task.scheduled_time,
                     task.scheduled_day, task.scheduled_date,
                     cron_expression=task.cron_expression,
+                    tz_name=action_timezone(task.action),
                 )
             db.commit()
             return {"ok": True, "status": "active", "next_run": task.next_run.isoformat() + "Z" if task.next_run else None}

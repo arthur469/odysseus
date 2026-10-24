@@ -456,6 +456,9 @@ body:not(.welcome-ready) #welcome-screen {
 }
 .task-log-status-ok    { background: #4ade80; box-shadow: 0 0 6px #4ade80, 0 0 3px #4ade80; }
 .task-log-status-error { background: var(--red, #f87171); box-shadow: 0 0 6px var(--red, #f87171), 0 0 3px var(--red, #f87171); }
+.task-log-status-partial { background: #fbbf24; box-shadow: 0 0 6px #fbbf24; }
+.task-log-partial-tag, .task-partial-label { color: #fbbf24; font-size: 10px; font-weight: 600; }
+.task-run-partial { border-color: #fbbf24; }
 .task-log-status-info  { background: color-mix(in srgb, var(--fg) 25%, transparent); }
 .task-log-status-queued  { background: #fbbf24; box-shadow: 0 0 0 2px color-mix(in srgb, #fbbf24 30%, transparent); }
 .task-log-status-running { background: #60a5fa; animation: task-log-pulse 1.4s ease-in-out infinite; }

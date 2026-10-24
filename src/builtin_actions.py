@@ -2261,7 +2261,7 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
             recent = seconds_since_model_activity(url, model)
         except Exception:
             recent = None
-        if recent is not None and recent < (20 * 60):
+        if not kwargs.get("user_initiated") and recent is not None and recent < (20 * 60):
             raise TaskDeferred(
                 f"audit model {model} was used {int(recent)}s ago; waiting for quiet window",
                 delay_seconds=20 * 60,
@@ -2278,7 +2278,8 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
             ],
             "started": _time.time(), "cancel": False,
         }
-        await _run_audit_all_job(key, sm, names, url, model, headers, teacher, owner, workload="background")
+        await _run_audit_all_job(key, sm, names, url, model, headers, teacher, owner,
+                                 workload="foreground" if kwargs.get("user_initiated") else "background")
         job = _skill_audit_jobs.get(key, {})
         if job.get("unavailable"):
             raise TaskDeferred("Skill audit model unavailable; retrying later", delay_seconds=20 * 60)
@@ -3540,7 +3541,16 @@ async def action_cookbook_serve(
     return f"Launched {repo_id} (session {sid})", True
 
 
+from src.pc_automations import execute_routine as action_pc_routine, synchronise_routines as action_pc_sync
+
+from src.journal_ia_action import run_journal as action_journal_ia
+from src.update_check import check_updates as action_check_odysseus_updates
+
 BUILTIN_ACTIONS = {
+    "check_odysseus_updates": action_check_odysseus_updates,
+    "journal_ia": action_journal_ia,
+    "pc_executer_routine": action_pc_routine,
+    "pc_synchroniser_routines": action_pc_sync,
     "tidy_sessions": action_tidy_sessions,
     "tidy_documents": action_tidy_documents,
     "consolidate_memory": action_consolidate_memory,
@@ -3566,6 +3576,10 @@ BUILTIN_ACTIONS = {
 
 # Descriptions for the UI/API
 BUILTIN_ACTION_INFO = {
+    "check_odysseus_updates": "Check Odysseus main for updates; notify once per new upstream revision, never install",
+    "journal_ia": "Journal-IA: local conversation and activity summaries with catch-up",
+    "pc_executer_routine": "Run a saved Automatisations-PC routine without an AI model",
+    "pc_synchroniser_routines": "Add new Automatisations-PC routines as manual tasks without executing them or using an AI model",
     "tidy_sessions": "Clean up empty chat sessions and auto-sort into folders",
     "tidy_documents": "Remove junk/empty documents",
     "consolidate_memory": "Remove duplicate memories",
