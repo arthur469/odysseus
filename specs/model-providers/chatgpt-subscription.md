@@ -14,7 +14,7 @@ The canonical generic reader does not accept `slug`-only items, so this runtime 
 
 ## Request And Response Shape
 
-Transport uses an inference-only ChatGPT backend Responses payload allowlist: model, instructions, input, stream, store, optional temperature and reasoning effort. It drops native tools, tool choice, previous-response/background fields and unrelated options. `build_responses_input()` flattens conversation history into text input/output items; multipart image blocks are not preserved. Native tool calls/results and encrypted typed reasoning continuity are not preserved as a general protocol. Agent tools therefore use the text protocol on this provider rather than a claimed native function-call continuation.
+Transport uses an inference-only ChatGPT backend Responses payload allowlist: model, instructions, input, stream, store, and optional reasoning effort. Temperature is always omitted because the subscription endpoint rejects it for every model. It drops native tools, tool choice, previous-response/background fields and unrelated options. `build_responses_input()` flattens conversation history into text input/output items; multipart image blocks are not preserved. Native tool calls/results and encrypted typed reasoning continuity are not preserved as a general protocol. Agent tools therefore use the text protocol on this provider rather than a claimed native function-call continuation.
 
 OAuth/device credentials and refresh are provider-session behavior. Expired credentials should return an actionable reconnect error, not generic model failure.
 
