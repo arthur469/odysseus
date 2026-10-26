@@ -20,7 +20,13 @@ def action_timezone(action):
     return TIMEZONE if action == ACTION else None
 
 
+class UnmanagedInstallation(RuntimeError):
+    """An imported source tree has no verifiable Git ancestry."""
+
+
 def installed_commit(root):
+    if not (Path(root) / ".git").exists():
+        raise UnmanagedInstallation("Source installation is not managed by Git.")
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True,
         text=True, check=True, timeout=10,
@@ -63,7 +69,14 @@ async def check_updates(owner, prompt="", notify=None, task_name="Odysseus updat
     if prompt not in (None, "", "{}"):
         raise ValueError("The update check does not accept commands or repository overrides.")
     root = Path(get_app_root())
-    local = await asyncio.to_thread(installed_commit, root)
+    try:
+        local = await asyncio.to_thread(installed_commit, root)
+    except UnmanagedInstallation:
+        raise TaskNoop(
+            "[SKIPPED] Update availability is inconclusive: this source installation "
+            "is not managed by Git. Preserve local customizations and review the "
+            "personal fork before updating. No network check or notification sent."
+        ) from None
     async with httpx.AsyncClient(timeout=20, headers={
         "Accept": "application/vnd.github+json", "User-Agent": "Odysseus-local-update-check",
         "X-GitHub-Api-Version": "2022-11-28",
